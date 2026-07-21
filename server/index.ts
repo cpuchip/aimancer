@@ -17,6 +17,11 @@
 //   POST /api/room/:pin/arm           — HINGE token ONLY (the hinge, always)
 //   POST /api/room/:pin/disarm        — HINGE token (script-lifecycle control, D4)
 //   POST /api/room/:pin/scrap         — either token (freeing a slot is safe)
+//   POST /api/room/:pin/prospect      — either token: paid vein preview (own-seat)
+//   POST /api/room/:pin/claim-contract — HINGE token (strategy is the human's)
+// ASYMMETRY (CORE IDENTITY #2): GET state over HTTP is the agent's NARROW view
+// — current effective prices only; the rush banner/forecast ride ONLY on the
+// ws snapshots (board + phones). The human holds the map.
 // Error shape everywhere: { ok: false, error } with 401 (no/unknown token),
 // 403 (wrong surface), 404 (no room), 405 (method), 409 (sim rule refused —
 // the spoken reason), 400 (malformed body).
@@ -135,7 +140,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   }
 
   // /api/room/:pin/:action
-  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/(state|draft|draft-request|oracle|arm|disarm|scrap|log|join|start|phase|hold|agent-prompt)$/)
+  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/(state|draft|draft-request|oracle|arm|disarm|scrap|prospect|claim-contract|log|join|start|phase|hold|agent-prompt)$/)
   if (!m) {
     sendJson(res, 404, { ok: false, error: 'unknown api route' })
     return
@@ -196,8 +201,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
 
   if (action === 'state') {
     if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'GET only' })
-    // redacted per token: a seat token sees its own hand; no token = public view
-    sendJson(res, 200, { ok: true, view: room.viewFor(who ? who.seat : null) })
+    // redacted per token: a seat token sees its own hand; no token = public
+    // view. rich=false ALWAYS on HTTP: this is the agent's NARROW surface —
+    // current prices only, never the rush banner/forecast (the board has it;
+    // your human relays it — that's the game).
+    sendJson(res, 200, { ok: true, view: room.viewFor(who ? who.seat : null, false) })
     return
   }
 
@@ -311,6 +319,27 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     // freeing a hand slot is safe from either surface (matches ws)
     if (!body.id) return sendJson(res, 400, { ok: false, error: 'missing id' })
     const r = room.command({ t: 'scrap', player: who.seat, id: body.id })
+    if (!r.ok) return refused(r)
+    sendJson(res, 200, { ok: true })
+    return
+  }
+
+  if (action === 'prospect') {
+    // the paid vein preview — either surface (matches ws); the reveal lands in
+    // you.prospects on the next /state read
+    const r = room.command({ t: 'prospect', player: who.seat })
+    if (!r.ok) return refused(r)
+    sendJson(res, 200, { ok: true })
+    return
+  }
+
+  if (action === 'claim-contract') {
+    // strategy is the HUMAN's: claiming is a hinge act, like arm (matches ws)
+    if (who.role !== 'hinge') {
+      return sendJson(res, 403, { ok: false, error: "Claiming a contract is the human's call — use the hinge token." })
+    }
+    if (typeof body.id !== 'number' && typeof body.id !== 'string') return sendJson(res, 400, { ok: false, error: 'missing id' })
+    const r = room.command({ t: 'claimContract', player: who.seat, id: Number(body.id) })
     if (!r.ok) return refused(r)
     sendJson(res, 200, { ok: true })
     return

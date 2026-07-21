@@ -36,3 +36,7 @@ export const SALT_MARKET = 101
 export const SALT_SPIKE = 202
 export const SALT_CORRUPT_PICK = 303
 export const SALT_CORRUPT_FLAW = 404
+export const SALT_CHARM_MARKET = 505
+export const SALT_VEIN = 606 // +1..+5 sub-lanes: rate, factor, x, y, spawn jitter
+export const SALT_RUSH = 707 // +1 sub-lane: mult
+export const SALT_CONTRACT = 808 // +1..+2 sub-lanes: qty, good

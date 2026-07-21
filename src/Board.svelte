@@ -28,6 +28,9 @@
   let clockNow = $state(0)
   setInterval(() => (clockNow = performance.now()), 500)
 
+  // RTS map presentation state — purely visual, all derived from snapshots
+  let nestFlare = $state(0) // increments on a fresh gremlinSpike → one-shot flash
+
   const ws = new WebSocket(wsUrl())
   ws.onopen = () => ws.send(JSON.stringify({ type: 'watch', room: pin }))
   ws.onmessage = (ev) => {
@@ -48,6 +51,7 @@
       const names = (i: number) => v.players[i]?.name ?? `P${i}`
       const fresh = freshEvents(feedCursor, v.events, v.eventSeq)
       if (fresh.length > 0) {
+        if (fresh.some((e) => e.t === 'gremlinSpike')) nestFlare++
         theater = [
           ...fresh.map((e) => ({ line: describeEvent(e, names), big: isDisaster(e), key: feedKey++ })).reverse(),
           ...theater,
@@ -62,6 +66,27 @@
   const phase = $derived(view?.phase ?? 'lobby')
   const banner = $derived(PHASE_BANNER[phase] ?? PHASE_BANNER.lobby)
   const trendGlyph = (t: 'up' | 'down' | 'flat') => (t === 'up' ? '▲' : t === 'down' ? '▼' : '·')
+
+  // ── the workshop map (RICH surface — the rush banner lives HERE, never in
+  // the agent's API view; CORE IDENTITY #2 made visible) ─────────────────────
+  const rush = $derived(view?.rush ?? null)
+  const veins = $derived(view?.veins ?? [])
+  const contracts = $derived(view?.contracts ?? [])
+  const openContracts = $derived(contracts.filter((c) => c.status === 'open'))
+  const claimedContracts = $derived(contracts.filter((c) => c.status === 'claimed'))
+  const playerHue = (i: number) => `hsl(${(i * 67) % 360} 72% 62%)`
+  /** Armed harvesters bound to a vein — each renders as a shuttling worker. */
+  const workersOn = (veinId: number) =>
+    view
+      ? view.players.flatMap((p) =>
+          p.scripts
+            .filter((sc) => sc.armed && sc.verb === 'harvest' && sc.node === veinId)
+            .map((sc) => ({ key: `${p.index}:${sc.id}`, player: p.index })),
+        )
+      : []
+  /** Workshop chip x-position (%) along the bottom strip. */
+  const chipX = (i: number) => 12 + i * (76 / Math.max(1, (view?.players.length ?? 1)))
+  const chipHasVerb = (i: number, verb: string) => view?.players[i]?.scripts.some((sc) => sc.armed && sc.verb === verb) ?? false
 
   // ── round-end + auto-advance surfacing (the "silent freeze" hotfix) ────────
   const roundComplete = $derived(view !== null && (phase === 'round1' || phase === 'round2') && view.ticksRemaining === 0)
@@ -116,7 +141,8 @@
     <span class="join-hint muted">join at <b style="letter-spacing:normal">{location.host}</b> · PIN <b>{pin}</b></span>
     {#if view && view.started}
       <span class="row" style="gap:var(--s-4)">
-        <span class="trend {marketTrend === 'up' ? 'up' : marketTrend === 'down' ? 'down' : ''}">📈 market {view.market}/widget {trendGlyph(marketTrend)}</span>
+        <span class="trend {marketTrend === 'up' ? 'up' : marketTrend === 'down' ? 'down' : ''}">📈 widgets {view.market}⚡ {trendGlyph(marketTrend)}</span>
+        <span class="trend">🧿 charms {view.marketCharms}⚡</span>
         <span class="trend {gremlinTrend === 'up' ? 'down' : ''}"><img class="ticon" src="/assets/gremlin_a.png" alt="gremlin" /> gremlin {view.gremlin}/10 {trendGlyph(gremlinTrend)}</span>
         <span class="muted num">tick {view.tick} · {view.tickMs / 1000}s</span>
       </span>
@@ -124,6 +150,15 @@
       <span class="muted">{status}</span>
     {/if}
   </div>
+
+  {#if rush && view && view.started && phase !== 'reveal'}
+    <!-- THE BOARD-ONLY ANNOUNCEMENT: the agent API never carries this. -->
+    <div class="rush-banner rush-{rush.good}">
+      <span class="rush-icon">{rush.good === 'charms' ? '🧿' : '⚙️'}</span>
+      <b>{rush.good.toUpperCase()} RUSH ×{rush.mult}</b>
+      <span>{rush.ticksLeft} {rush.ticksLeft === 1 ? 'tick' : 'ticks'} left — tell your agent!</span>
+    </div>
+  {/if}
 
   {#if !view || !view.started}
     <div class="card lobby-hero" style="text-align:center; padding:var(--s-7)">
@@ -215,12 +250,84 @@
       </div>
     {/if}
 
+    <!-- ── THE WORKSHOP MAP — the room-watchable centerpiece ─────────────── -->
+    <div class="map" class:map-rush={rush !== null}>
+      <div class="zone zone-fields"><span class="zone-label">crystal fields</span></div>
+      <div class="zone zone-market"><span class="zone-label">market quarter</span></div>
+      <div class="zone zone-wastes"><span class="zone-label">gremlin wastes</span></div>
+
+      {#each veins as v (v.id)}
+        <div
+          class="vein"
+          class:dry={v.reserve <= 0}
+          class:fresh={v.spawnedAt > 0 && view.tick - v.spawnedAt <= 1}
+          style="left:{v.x}%; top:{v.y + 6}%"
+        >
+          <span class="vein-ping"></span>
+          <img class="vein-img" src="/assets/res_matter.png" alt="vein" />
+          <div class="vein-fill"><div class="vein-fill-bar" style="height:{Math.round((100 * v.reserve) / Math.max(1, v.reserveMax))}%"></div></div>
+          <span class="vein-tag num">#{v.id} · r{v.rate}{v.reserve <= 0 ? ' · DRY' : ''}</span>
+          {#each workersOn(v.id) as wk, wi (wk.key)}
+            <span
+              class="worker"
+              style="background:{playerHue(wk.player)}; --dx:{chipX(wk.player) - v.x}cqw; --dy:{92 - (v.y + 6)}cqh; animation-delay:{wi * 0.7}s"
+            ></span>
+          {/each}
+        </div>
+      {/each}
+
+      <div class="stall" class:stall-rush={rush?.good === 'widgets'} style="left:86%; top:18%">
+        <img class="stall-img" src="/assets/res_widgets.png" alt="widget stall" />
+        <span class="stall-price num"><b>{view.market}</b>⚡</span>
+        {#if rush?.good === 'widgets'}<span class="stall-mult">×{rush.mult} · {rush.ticksLeft}t</span>{/if}
+      </div>
+      <div class="stall" class:stall-rush={rush?.good === 'charms'} style="left:86%; top:52%">
+        <span class="stall-emoji">🧿</span>
+        <span class="stall-price num"><b>{view.marketCharms}</b>⚡</span>
+        {#if rush?.good === 'charms'}<span class="stall-mult">×{rush.mult} · {rush.ticksLeft}t</span>{/if}
+      </div>
+      {#if !rush && view.nextRushInTicks !== undefined}
+        <span class="rush-forecast muted num" style="left:86%; top:80%">rush in ~{view.nextRushInTicks}t</span>
+      {/if}
+
+      <div class="nest" style="left:10%; top:80%">
+        {#key nestFlare}<span class="nest-flare" class:go={nestFlare > 0}></span>{/key}
+        <img class="nest-img" src="/assets/gremlin_a.png" alt="gremlin nest" />
+        <span class="vein-tag num">nest · {view.gremlin}/10</span>
+      </div>
+
+      <!-- workshop strip: each dyad's chip; armed craft/sell pulse it -->
+      {#each view.players as p (p.index)}
+        <div
+          class="shop-chip"
+          class:busy={chipHasVerb(p.index, 'craft') || chipHasVerb(p.index, 'sell')}
+          style="left:{chipX(p.index)}%; top:92%; border-color:{playerHue(p.index)}"
+          title={p.name}
+        >
+          <span class="shop-dot" style="background:{playerHue(p.index)}"></span>{p.name.slice(0, 8)}
+        </div>
+      {/each}
+    </div>
+
+    {#if contracts.length > 0}
+      <div class="contract-strip">
+        {#each openContracts as c (c.id)}
+          <span class="contract-chip open">📜 #{c.id}: {c.qty} {c.good} → +{c.bonus} <span class="muted">(claim on your phone)</span></span>
+        {/each}
+        {#each claimedContracts as c (c.id)}
+          <span class="contract-chip claimed" style="border-color:{playerHue(c.player ?? 0)}">
+            📜 #{c.id} {view.players[c.player ?? 0]?.name}: {c.progress}/{c.qty} {c.good} · by t{c.deadline}
+          </span>
+        {/each}
+      </div>
+    {/if}
+
     <div class="grid">
       <div>
         <h2>Scoreboard</h2>
         <table>
           <thead>
-            <tr><th>#</th><th>workshop</th><th class="r">score</th><th class="r">⚡</th><th class="r">⚙ sold</th><th class="r">waste</th><th>scripts</th></tr>
+            <tr><th>#</th><th>workshop</th><th class="r">score</th><th class="r">⚡</th><th class="r">⚙ sold</th><th class="r">🧿 sold</th><th class="r">waste</th><th>scripts</th></tr>
           </thead>
           <tbody>
             {#each ranked as p, i (p.index)}
@@ -235,6 +342,7 @@
                 </td>
                 <td class="r num">{p.tokens}</td>
                 <td class="r num">{p.widgetsSold}</td>
+                <td class="r num">{p.charmsSold}</td>
                 <td class="r num">{p.waste}</td>
                 <td>
                   {#each p.scripts as sc (sc.id)}<span title={sc.id}>{fateIcon(sc)}</span>{/each}

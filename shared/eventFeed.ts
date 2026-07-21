@@ -49,6 +49,15 @@ export function describeEvent(e: SimEvent, nameOf: (i: number) => string): strin
     case 'gremlinSpike': return `👹 GREMLIN SPIKE (pressure ${e.pressure}) — damage ${e.damage.join(' / ')}`
     case 'corrupted': return `🪳 a gremlin chewed on ${nameOf(e.player)}'s ${e.id}…`
     case 'marketShift': return `📈 market now pays ${e.market} per widget`
+    case 'charmShift': return `🧿 charms now fetch ${e.market} at the stall`
+    case 'veinSpawned': return `⛏ a NEW VEIN surfaced — vein #${e.id} (rate ${e.rate}, ${e.reserve} matter)`
+    case 'veinExhausted': return `🪨 vein #${e.id} ran DRY — harvesters there are idling`
+    case 'prospected': return `🔭 ${nameOf(e.player)} surveyed the field — the next vein's secret is theirs`
+    case 'contractOffered': return `📜 NEW CONTRACT #${e.id}: deliver ${e.qty} ${e.good} → +${e.bonus} — claim it on your phone`
+    case 'contractClaimed': return `📜 ${nameOf(e.player)} claimed contract #${e.id}`
+    case 'contractFulfilled': return `📦 ${nameOf(e.player)} DELIVERED contract #${e.id} (+${e.bonus})`
+    case 'contractFailed': return `📜💥 ${nameOf(e.player)} blew contract #${e.id} (−${e.penalty})`
+    case 'contractExpired': return `📜 contract #${e.id} expired unclaimed`
     case 'scrapped': return `🗑 ${nameOf(e.player)} scrapped ${e.id}`
     case 'phase': return PHASE_LINES[e.phase] ?? `phase: ${e.phase}`
   }
@@ -56,5 +65,5 @@ export function describeEvent(e: SimEvent, nameOf: (i: number) => string): strin
 
 /** The disaster theater shows these big; everything else is a footnote. */
 export function isDisaster(e: SimEvent): boolean {
-  return e.t === 'misfire' || e.t === 'blowup' || e.t === 'corrupted' || e.t === 'gremlinSpike' || e.t === 'draftFailed'
+  return e.t === 'misfire' || e.t === 'blowup' || e.t === 'corrupted' || e.t === 'gremlinSpike' || e.t === 'draftFailed' || e.t === 'contractFailed'
 }

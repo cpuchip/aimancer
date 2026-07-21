@@ -71,7 +71,7 @@ arm path, by design.
 | `/api/room/:pin/agent-prompt` | GET | **worker** | the ready-to-paste "connect your agent" text (single source of truth); never carries the hinge token |
 | `/api/room/:pin/start` | POST | host **hinge** | `{tickMs?, round1Ticks?, round2Ticks?}` — start the game |
 | `/api/room/:pin/phase` | POST | host **hinge** | `{to}` — advance the weave (round1→intermission→round2→reveal) |
-| `/api/room/:pin/state` | GET | any/none | redacted room view (a seat token adds `you.hand` + `you.pending`) |
+| `/api/room/:pin/state` | GET | any/none | the NARROW view: redacted room state incl. `veins` + `contracts` + current prices — never the rush banner/forecast (a seat token adds `you.hand` + `you.pending` + `you.prospects`) |
 | `/api/room/:pin/log` | GET | any/none | command log + seed (other seats' draft bodies stripped; host unlocks all in reveal) |
 | `/api/room/:pin/draft` | POST | worker | `{script, tier?}` — submit a script you wrote (costs tier price) |
 | `/api/room/:pin/draft-request` | POST | either | `{tier, order?}` — ask the practice generator (or a wired model); debits now, drafts arrive async (poll state) |
@@ -79,6 +79,8 @@ arm path, by design.
 | `/api/room/:pin/arm` | POST | **hinge** | `{id}` — the human act; worker tokens get 403 |
 | `/api/room/:pin/disarm` | POST | **hinge** | `{id}` — script-lifecycle control lives with arm (tightened D4) |
 | `/api/room/:pin/scrap` | POST | either | `{id}` — free an (unarmed) hand slot |
+| `/api/room/:pin/prospect` | POST | either | paid preview of the NEXT vein (lands in `you.prospects`) |
+| `/api/room/:pin/claim-contract` | POST | **hinge** | `{id}` — the human signs the delivery; worker tokens get 403 |
 
 Errors are always `{ ok: false, error }`: **401** no/unknown token · **403**
 wrong surface (e.g. worker tries to arm) · **404** no such room · **405**

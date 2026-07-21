@@ -151,7 +151,7 @@ function startFakeLLM(): { close: () => void } {
       if (body.includes('FENCED')) return reply('Here you go:\n```json\n[{"verb":"refine","params":{"rate":1}}]\n```\nEnjoy!')
       return reply(
         JSON.stringify([
-          { verb: 'harvest', params: { rate: 2 } },
+          { verb: 'harvest', params: { rate: 2, node: 1 } },
           { verb: 'sell', params: { amount: 2 }, when: { field: 'widgets', op: '>', value: 0 } },
         ]),
       )
@@ -280,7 +280,7 @@ async function main(): Promise<void> {
     bob.send({
       type: 'draft',
       token: bob.welcome!.hingeToken,
-      script: { id: 'bob-s1', verb: 'harvest', params: { rate: 2 } },
+      script: { id: 'bob-s1', verb: 'harvest', params: { rate: 2, node: 1 } },
       tier: 'cheap',
     })
     await bob.waitFor((m) => m.type === 'error' && m.message.includes('worker'), 'hinge draft rejected')
@@ -288,7 +288,7 @@ async function main(): Promise<void> {
     bob.send({
       type: 'draft',
       token: bob.welcome!.workerToken,
-      script: { id: 'bob-s1', verb: 'harvest', params: { rate: 2 }, when: { field: 'matter', op: '<', value: SECRET } },
+      script: { id: 'bob-s1', verb: 'harvest', params: { rate: 2, node: 1 }, when: { field: 'matter', op: '<', value: SECRET } },
       tier: 'cheap',
     })
     await bob.waitView((v) => (v.you?.hand.length ?? 0) === 1, 'draft landed in the hand')
@@ -355,13 +355,13 @@ async function main(): Promise<void> {
     const draftDenied = await fetch(`${BASE}/api/room/${pin}/draft`, {
       method: 'POST',
       headers: { authorization: `Bearer ${bob.welcome!.hingeToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ script: { id: 'bob-s2', verb: 'harvest', params: { rate: 1 } }, tier: 'cheap' }),
+      body: JSON.stringify({ script: { id: 'bob-s2', verb: 'harvest', params: { rate: 1, node: 1 } }, tier: 'cheap' }),
     })
     ok(draftDenied.status === 403, 'HTTP draft with hinge token → 403 (role tagging both ways)')
     const draftOk = await fetch(`${BASE}/api/room/${pin}/draft`, {
       method: 'POST',
       headers: { authorization: `Bearer ${bob.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ script: { id: 'bob-s2', verb: 'harvest', params: { rate: 1 } }, tier: 'cheap' }),
+      body: JSON.stringify({ script: { id: 'bob-s2', verb: 'harvest', params: { rate: 1, node: 1 } }, tier: 'cheap' }),
     })
     ok(draftOk.status === 200, 'HTTP draft with worker token lands')
 
@@ -420,7 +420,7 @@ async function main(): Promise<void> {
     bob2.send({
       type: 'draft',
       token: bob2.welcome!.workerToken,
-      script: { id: 'bob-s3', verb: 'harvest', params: { rate: 2 } },
+      script: { id: 'bob-s3', verb: 'harvest', params: { rate: 2, node: 1 } },
       tier: 'cheap',
     })
     await bob2.waitView((v) => (v.you?.hand.length ?? 0) === 3, 'intermission draft stocks the hand')
@@ -506,7 +506,7 @@ async function main(): Promise<void> {
     bob2.send({
       type: 'draft',
       token: bob2.welcome!.workerToken,
-      script: { id: 'late', verb: 'harvest', params: { rate: 1 } },
+      script: { id: 'late', verb: 'harvest', params: { rate: 1, node: 1 } },
       tier: 'cheap',
     })
     await bob2.waitFor((m) => m.type === 'error' && m.message.includes('over'), 'post-reveal draft rejected')
@@ -621,7 +621,7 @@ async function main(): Promise<void> {
     const dvDraft = await fetch(`${BASE}/api/room/${davePin}/draft`, {
       method: 'POST',
       headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ script: { id: 'dv1', verb: 'harvest', params: { rate: 2 } }, tier: 'cheap' }),
+      body: JSON.stringify({ script: { id: 'dv1', verb: 'harvest', params: { rate: 2, node: 1 } }, tier: 'cheap' }),
     })
     ok(dvDraft.status === 200, 'HTTP direct draft still works (the BYO path)')
     const oracleOk = await fetch(`${BASE}/api/room/${davePin}/oracle`, {
@@ -745,12 +745,12 @@ async function main(): Promise<void> {
 
     // the full BYO loop, HTTP only. h1 proves the token split; h2 (never
     // armed, so it CARRIES into round 2) proves draft → oracle → verified arm.
-    ok((await post(`/api/room/${hera.pin}/draft`, ivan.workerToken, { script: { id: 'h1', verb: 'harvest', params: { rate: 3 } }, tier: 'cheap' })).status === 200, 'loop: the agent drafts its OWN script over HTTP (BYO — no server LLM anywhere)')
+    ok((await post(`/api/room/${hera.pin}/draft`, ivan.workerToken, { script: { id: 'h1', verb: 'harvest', params: { rate: 3, node: 1 } }, tier: 'cheap' })).status === 200, 'loop: the agent drafts its OWN script over HTTP (BYO — no server LLM anywhere)')
     ok((await post(`/api/room/${hera.pin}/arm`, ivan.workerToken, { id: 'h1' })).status === 403, 'loop: the agent CANNOT arm (worker token → 403; the hinge holds)')
     ok((await post(`/api/room/${hera.pin}/arm`, ivan.hingeToken, { id: 'h1' })).status === 200, "loop: the human's hinge arms it (YOLO in round 1)")
     ok((await post(`/api/room/${hera.pin}/disarm`, ivan.workerToken, { id: 'h1' })).status === 403, 'loop: worker disarm → 403 (D4 tightening — lifecycle is the hinge)')
     ok((await post(`/api/room/${hera.pin}/disarm`, ivan.hingeToken, { id: 'h1' })).status === 200, 'loop: hinge disarm lands')
-    ok((await post(`/api/room/${hera.pin}/draft`, ivan.workerToken, { script: { id: 'h2', verb: 'harvest', params: { rate: 2 } }, tier: 'cheap' })).status === 200, 'loop: a second draft stays un-played (it will carry into round 2)')
+    ok((await post(`/api/room/${hera.pin}/draft`, ivan.workerToken, { script: { id: 'h2', verb: 'harvest', params: { rate: 2, node: 1 } }, tier: 'cheap' })).status === 200, 'loop: a second draft stays un-played (it will carry into round 2)')
     ok((await post(`/api/room/${hera.pin}/phase`, ivan.hingeToken, { to: 'intermission' })).status === 403, 'HTTP phase by a non-host → 403')
     ok((await post(`/api/room/${hera.pin}/phase`, hera.hingeToken, { to: 'intermission' })).status === 200, 'host advances to intermission over HTTP')
     ok((await post(`/api/room/${hera.pin}/phase`, hera.hingeToken, { to: 'round2' })).status === 200, 'host advances to round 2 over HTTP')
@@ -867,17 +867,85 @@ async function main(): Promise<void> {
     // (5) per-script lastRun: the agent sees its own yield; the public stays fate-only
     const yld = await (await post('/api/room', null, { name: 'Yield', tickMs: 300, round1Ticks: 5, autoAdvance: false })).json()
     ok((await post(`/api/room/${yld.pin}/start`, yld.hingeToken)).status === 200, 'yield room started')
-    ok((await post(`/api/room/${yld.pin}/draft`, yld.workerToken, { script: { id: 'y1', verb: 'harvest', params: { rate: 2 } }, tier: 'cheap' })).status === 200, 'yield draft landed')
+    ok((await post(`/api/room/${yld.pin}/draft`, yld.workerToken, { script: { id: 'y1', verb: 'harvest', params: { rate: 2, node: 1 } }, tier: 'cheap' })).status === 200, 'yield draft landed')
     ok((await post(`/api/room/${yld.pin}/arm`, yld.hingeToken, { id: 'y1' })).status === 200, 'yield armed')
     await new Promise((r) => setTimeout(r, 800))
     const ySt = (await (await fetch(`${BASE}/api/room/${yld.pin}/state`, { headers: { authorization: `Bearer ${yld.workerToken}` } })).json()).view
     const y1 = ySt.you.hand.find((sl: { script: { id: string } }) => sl.script.id === 'y1')
-    ok(y1?.lastRun && y1.lastRun.ran === true && y1.lastRun.note === '+2 matter', `own-seat /state carries lastRun — agents can see per-script yield (${y1?.lastRun?.note})`)
+    ok(y1?.lastRun && y1.lastRun.ran === true && y1.lastRun.note === '+2 matter from vein #1', `own-seat /state carries lastRun — agents can see per-script yield (${y1?.lastRun?.note})`)
     const yPub = (await (await fetch(`${BASE}/api/room/${yld.pin}/state`)).json()).view
     ok(
       yPub.players[0].scripts.length > 0 && yPub.players[0].scripts.every((sc: Record<string, unknown>) => !('lastRun' in sc) && !('script' in sc)),
       'public script views stay fate-only — no lastRun, no bodies',
     )
+
+    // ── THE DEPTH UPDATE: map/veins on the wire, prospect, contracts, and ────
+    // ── THE ASYMMETRY (rush rides ws-only — the agent's HTTP view is narrow) ──
+    {
+      const dp = await (await post('/api/room', null, { name: 'Depth', tickMs: 300, round1Ticks: 1, round2Ticks: 12, autoAdvance: false })).json()
+      ok((await post(`/api/room/${dp.pin}/start`, dp.hingeToken)).status === 200, 'depth room started')
+      const dSt = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`, { headers: { authorization: `Bearer ${dp.workerToken}` } })).json()).view
+      // (1) the map is on the wire: veins with reserves, both market prices
+      ok(Array.isArray(dSt.veins) && dSt.veins.length >= 3, `a fresh room's state carries the vein map (${dSt.veins.length} veins)`)
+      ok(dSt.veins.every((v: Record<string, unknown>) => typeof v.id === 'number' && typeof v.rate === 'number' && typeof v.reserve === 'number' && typeof v.x === 'number'), 'each vein carries id/rate/reserve/layout')
+      ok(typeof dSt.market === 'number' && typeof dSt.marketCharms === 'number', 'both goods quote a current price')
+      ok(Array.isArray(dSt.contracts), 'the contracts array is on the wire')
+      // (2) ★ THE ASYMMETRY, structurally: NO rush key on HTTP — any token
+      ok(!('rush' in dSt) && !('nextRushInTicks' in dSt), 'the agent HTTP view NEVER carries the rush banner or forecast (worker token)')
+      const dPub = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`)).json()).view
+      ok(!('rush' in dPub) && !('nextRushInTicks' in dPub), 'the tokenless HTTP view is narrow too')
+      const dHinge = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`, { headers: { authorization: `Bearer ${dp.hingeToken}` } })).json()).view
+      ok(!('rush' in dHinge), 'even the hinge token gets the narrow view over HTTP — rush is a ws (human-surface) fact')
+      // …while the ws BOARD snapshot carries the rush field + forecast
+      const dBoard = new TestClient('key-dboard', 'DBoard')
+      await dBoard.open(dp.pin, true)
+      const dbView = await dBoard.waitView((v) => v.started, 'depth board snapshot')
+      ok('rush' in dbView && 'nextRushInTicks' in dbView, 'the ws board snapshot carries rush + forecast (the human surface holds the map)')
+      ok(typeof dbView.nextRushInTicks === 'number', `the board can even forecast the next window (~${dbView.nextRushInTicks}t)`)
+      dBoard.close()
+      // (3) prospect over HTTP (worker): paid, own-seat, invisible to others
+      const proRes = await post(`/api/room/${dp.pin}/prospect`, dp.workerToken)
+      ok(proRes.status === 200, 'HTTP prospect (worker token) lands')
+      const dSt2 = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`, { headers: { authorization: `Bearer ${dp.workerToken}` } })).json()).view
+      ok(dSt2.you.prospects.length === 1 && typeof dSt2.you.prospects[0].rate === 'number' && dSt2.you.prospects[0].spawnsInTicks >= 0, `you.prospects carries the preview (vein #${dSt2.you.prospects[0].id})`)
+      const joe = await (await post(`/api/room/${dp.pin}/join`, null, { name: 'Joe' })).json()
+      // (a started room refuses NEW seats — Joe rejoin path not needed; use the public view instead)
+      ok(!JSON.stringify(dPub).includes('"prospects"'), 'prospects never appear in the public view (own-seat info)')
+      void joe
+      // (4) contracts: none in round 1; offers post in round 2; the HINGE claims
+      ok(dSt2.contracts.length === 0 && dSt2.phase === 'round1', 'round 1 posts no contract offers')
+      ok((await post(`/api/room/${dp.pin}/phase`, dp.hingeToken, { to: 'intermission' })).status === 200, 'depth room → intermission')
+      ok((await post(`/api/room/${dp.pin}/phase`, dp.hingeToken, { to: 'round2' })).status === 200, 'depth room → round 2')
+      await new Promise((r) => setTimeout(r, 1200)) // round-2 tick 2+ (300ms tick) — the first offer posts
+      const dSt3 = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`)).json()).view
+      ok(dSt3.contracts.length >= 1 && dSt3.contracts[0].status === 'open', `a round-2 offer posted (contract #${dSt3.contracts[0]?.id}: ${dSt3.contracts[0]?.qty} ${dSt3.contracts[0]?.good})`)
+      const claimWorker = await post(`/api/room/${dp.pin}/claim-contract`, dp.workerToken, { id: dSt3.contracts[0].id })
+      ok(claimWorker.status === 403, 'claim-contract with the WORKER token → 403 (strategy is the human\'s)')
+      const claimHinge = await post(`/api/room/${dp.pin}/claim-contract`, dp.hingeToken, { id: dSt3.contracts[0].id })
+      ok(claimHinge.status === 200, 'claim-contract with the HINGE token lands')
+      const dSt4 = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`)).json()).view
+      ok(dSt4.contracts[0].status === 'claimed' && dSt4.contracts[0].player === 0 && typeof dSt4.contracts[0].deadline === 'number', 'the claim binds publicly with a deadline (the room watches the race)')
+      ok((await post(`/api/room/${dp.pin}/claim-contract`, dp.hingeToken, { id: 999 })).status === 409, 'claiming a nonexistent contract → 409 with the spoken reason')
+      // (5) the new verbs ride the same wire: craft + sell-charms drafts land
+      ok((await post(`/api/room/${dp.pin}/draft`, dp.workerToken, { script: { id: 'cf1', verb: 'craft', params: { rate: 1 } }, tier: 'cheap' })).status === 200, 'a craft draft lands over HTTP')
+      ok((await post(`/api/room/${dp.pin}/draft`, dp.workerToken, { script: { id: 'sc1', verb: 'sell', params: { amount: 2, good: 'charms' } }, tier: 'cheap' })).status === 200, 'a sell-charms draft lands over HTTP (string enum param through the wire)')
+      const orCf = await (await post(`/api/room/${dp.pin}/oracle`, dp.workerToken, { id: 'cf1' })).json()
+      ok(orCf.ok && orCf.report.ok, 'the oracle greenlights a craft over HTTP')
+      const orSc = await (await post(`/api/room/${dp.pin}/oracle`, dp.workerToken, { id: 'sc1' })).json()
+      ok(orSc.ok && orSc.report.ok && orSc.report.reasons.some((r: string) => r.includes('BASE prices')), 'the sell dry-run SAYS the forecast lives on the board (the asymmetry is taught in-band)')
+      // (6) the paste-prompt teaches the blind spot + the new verbs
+      const dAp = await (await fetch(`${BASE}/api/room/${dp.pin}/agent-prompt?token=${dp.workerToken}`)).text()
+      ok(dAp.includes('KNOW YOUR BLIND SPOT') && dAp.toLowerCase().includes('holds the map'), 'the paste-prompt teaches the asymmetry (listen to your human)')
+      ok(dAp.includes('"craft"') && dAp.includes('prospect') && dAp.includes('node'), 'the paste-prompt cheatsheet covers craft/prospect/node')
+      // (7) armed verb+node are public (RTS units on the map); bodies stay private
+      ok((await post(`/api/room/${dp.pin}/draft`, dp.workerToken, { script: { id: 'hv1', verb: 'harvest', params: { rate: 2, node: 1 } }, tier: 'cheap' })).status === 200, 'map-worker draft lands')
+      ok((await post(`/api/room/${dp.pin}/arm`, dp.hingeToken, { id: 'hv1' })).status === 200, 'map-worker armed')
+      const dSt5 = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`)).json()).view
+      const hv = dSt5.players[0].scripts.find((sc: Record<string, unknown>) => sc.id === 'hv1')
+      const cf = dSt5.players[0].scripts.find((sc: Record<string, unknown>) => sc.id === 'cf1')
+      ok(hv && hv.verb === 'harvest' && hv.node === 1, 'an ARMED harvester is a public map unit (verb + vein binding)')
+      ok(cf && cf.verb === null && !('params' in cf), 'an un-armed draft stays body-secret (verb null, no params ever)')
+    }
 
     // ── PRACTICE MODE: a second server with NO model wired ───────────────────
     // The env value is an UNINTERPOLATED compose literal — the exact string the

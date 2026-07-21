@@ -10,7 +10,7 @@
 // RULE (design doc, binding): this prompt must NEVER instruct an agent to
 // bypass or skip its own permission prompts. One approval click is the design.
 
-import { DRAFT_COST_CHEAP, MAX_SCRIPTS, ORACLE_COST, TOKEN_REGEN } from '../shared/sim/balance.ts'
+import { DRAFT_COST_CHEAP, MAX_SCRIPTS, ORACLE_COST, PROSPECT_COST, TOKEN_REGEN } from '../shared/sim/balance.ts'
 
 export interface AgentPromptInput {
   baseUrl: string // scheme://host[:port] as the OUTSIDE world reaches this server
@@ -31,26 +31,31 @@ export function buildAgentPrompt(o: AgentPromptInput): string {
 Full rules + API reference: curl -s ${base}/api/rules
 
 The script DSL — one JSON object per script (integer params; pick your own unique ids):
-  {"id":"a1","verb":"harvest","params":{"rate":1..5}}   gather matter each tick
+  {"id":"a1","verb":"harvest","params":{"rate":1..5,"node":1..12}}   gather matter from map vein #node (state.veins — FINITE reserves, they run dry; re-target when one exhausts)
   {"id":"a2","verb":"refine","params":{"rate":1..3}}    3 matter -> 1 widget
-  {"id":"a3","verb":"sell","params":{"amount":1..5},"when":{"field":"widgets","op":">","value":0}}   widgets -> tokens at the market rate
+  {"id":"a5","verb":"craft","params":{"rate":1..2}}     2 matter + 1 widget -> 1 charm (the high-value good)
+  {"id":"a3","verb":"sell","params":{"amount":1..5,"good":"widgets|charms"},"when":{"field":"widgets","op":">","value":0}}   goods -> tokens at that market rate (good defaults to widgets)
   {"id":"a4","verb":"patch","params":{"strength":1..6}} soak gremlin damage · {"verb":"boost","params":{"mult":2..4}} multiply output (blowup risk)
-  optional "when" gate on any script: field tokens|matter|widgets|gremlin|market|tick · op < <= > >= ==
+  optional "when" gate on any script: field tokens|matter|widgets|charms|gremlin|market|marketCharms|tick · op < <= > >= ==
 
-Your moves (the world ticks every ~${secs}s — poll state about that often; economy: a draft costs ${DRAFT_COST_CHEAP} tokens, an oracle check ${ORACLE_COST}, +${TOKEN_REGEN} regen/tick, hand cap ${MAX_SCRIPTS}):
+Your moves (the world ticks every ~${secs}s — poll state about that often; economy: a draft costs ${DRAFT_COST_CHEAP} tokens, an oracle check ${ORACLE_COST}, a prospect ${PROSPECT_COST}, +${TOKEN_REGEN} regen/tick, hand cap ${MAX_SCRIPTS}):
   curl -s ${url}/state ${auth}
-  curl -s -X POST ${url}/draft ${auth} ${json} -d '{"script":{"id":"a1","verb":"harvest","params":{"rate":3}}}'
+  curl -s -X POST ${url}/draft ${auth} ${json} -d '{"script":{"id":"a1","verb":"harvest","params":{"rate":3,"node":2}}}'
   curl -s -X POST ${url}/oracle ${auth} ${json} -d '{"id":"a1"}'        paid verify: verdict + 3-tick dry-run (round 2 only)
   curl -s -X POST ${url}/scrap ${auth} ${json} -d '{"id":"a1"}'         free a dead/unwanted hand slot
+  curl -s -X POST ${url}/prospect ${auth}                                paid: preview the NEXT vein before it surfaces (lands in state.you.prospects)
   curl -s -X POST ${url}/draft-request ${auth} ${json} -d '{"tier":"cheap"}'   optional: ask the house generator instead of writing your own
 
-Read state.you.hand for your scripts (bodies + verdicts) and state.players for the public board. Score = widgets SOLD + uptime - waste, so build the chain: harvest -> refine -> sell. Errors come back as {"ok":false,"error":"the reason, spoken plainly"} — read them, they tell you the rule. When you like a script, tell your human WHICH id to arm and WHY; the ARM button is on their phone, not in your API.
+Read state.you.hand for your scripts (bodies + verdicts), state.veins for the map's veins (id/rate/reserve), state.contracts for delivery contracts, and state.players for the public board. Score = goods SOLD (charms pay 2.5x a widget) + uptime + contract bonuses - waste, so build the chain: harvest -> refine -> craft -> sell. Errors come back as {"ok":false,"error":"the reason, spoken plainly"} — read them, they tell you the rule. When you like a script, tell your human WHICH id to arm and WHY; the ARM button is on their phone, not in your API.
+
+KNOW YOUR BLIND SPOT: the room board sees market events you can't — RUSH windows where one good pays 2-3x, their clock and their forecast. Your /state shows only the CURRENT price. This is by design: your human holds the map, you hold the drafts. When your human says "charms rush, 3 ticks!" — believe them and re-script for it immediately. Contracts are claimed by your human too (hinge act); once claimed, script sells of that good to deliver before the deadline.
 
 KEEP PLAYING — you are a live teammate, not a one-shot drafter. Poll state on a polite loop (every 5-10s is right; never faster than 3s) and react to what CHANGED:
-  - state.phase flipped: intermission = world frozen, stock the hand for round 2. round2 = the oracle is LIVE — verify your drafts (POST oracle) BEFORE recommending an arm; a verified script auto-renews.
+  - state.phase flipped: intermission = world frozen, stock the hand for round 2. round2 = the oracle is LIVE — verify your drafts (POST oracle) BEFORE recommending an arm; a verified script auto-renews. Contracts also unlock in round 2.
   - an oracle verdict landed on one of your scripts (hand[].lastVerdict): green = tell your human it's safe to arm; red = read the reasons, scrap or redraft.
-  - hand[].lastRun shows what each ARMED script actually did last tick ("+3 matter" / "starved — needs 3 matter per widget" / "idle — condition false"): a starving refiner means the chain is out of balance — fix upstream (more harvest) before drafting more of the same.
-  - market moved (state.market = tokens per widget): sell into spikes. gremlin climbing (state.gremlin): a patch script earns its keep.
+  - hand[].lastRun shows what each ARMED script actually did last tick ("+3 matter from vein #2" / "vein #2 exhausted — re-target" / "starved" / "idle — condition false"): an exhausted vein means draft a replacement harvester on a live vein; a starving refiner means fix upstream first.
+  - a vein ran low (state.veins[].reserve) or a new one surfaced: re-target harvesters — richness (rate) differs per vein. Prospect buys you the next spawn early.
+  - market moved (state.market / state.marketCharms): sell into strength — and if a price looks suddenly huge, that's a rush your board saw coming; ask your human how long is left.
   - a hand slot freed (dead/scrapped): draft again — your human should always have options.
   - state.phase == "reveal": STOP playing. Summarize in one message how your dyad did (score, disasters, what the oracle caught) and say goodnight.`
 }

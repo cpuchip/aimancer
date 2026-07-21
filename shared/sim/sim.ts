@@ -8,14 +8,22 @@ import {
   BOOST_BLOWUP_MATTER_LOSS,
   BOOST_BLOWUP_WASTE,
   BOOST_RISK_PER_STEP,
+  CHARM_MARKET_BASE,
+  CONTRACT_ID_MAX,
+  CONTRACT_MAX_ACTIVE,
+  CONTRACT_OFFER_TTL,
   CORRUPT_THRESHOLD,
+  CRAFT_MATTER_PER_CHARM,
+  CRAFT_WIDGETS_PER_CHARM,
   DEAD_SCRIPT_WASTE,
   DRAFT_COST_CHEAP,
   DRAFT_COST_SMART,
   MARKET_BASE,
   MAX_SCRIPTS,
   ORACLE_COST,
+  PROSPECT_COST,
   REFINE_RATIO,
+  SCORE_PER_CHARM,
   SCORE_PER_UPTIME,
   SCORE_PER_WIDGET,
   SCORE_WASTE_MULT,
@@ -24,11 +32,25 @@ import {
   TOKEN_CAP,
   TOKEN_REGEN,
   TOKEN_START,
+  VEIN_ID_MAX,
+  VEINS_INITIAL,
 } from './balance.ts'
 import { flawScript } from './flaws.ts'
 import { hashNoise, saltOf, SALT_CORRUPT_FLAW, SALT_CORRUPT_PICK } from './noise.ts'
 import { staticCheck } from './oracle.ts'
-import { condPasses, pressureAt, runVerb, spikeAt, stepMarket } from './world.ts'
+import {
+  condPasses,
+  contractSpec,
+  effectivePrice,
+  pressureAt,
+  runVerb,
+  spawnVein,
+  spikeAt,
+  stepCharmMarket,
+  stepMarket,
+  veinSpec,
+  type WorldView,
+} from './world.ts'
 import { mulberry32 } from '../rng.ts'
 import { PHASE_NEXT } from './types.ts'
 import type {
@@ -60,6 +82,11 @@ function emit(s: SimState, e: SimEvent): void {
 
 // ── Game construction ────────────────────────────────────────────────────────
 
+/** The opening field: every vein whose spawnTick is 0 (the seeded initials). */
+function initialVeins(seed: number): SimState['veins'] {
+  return Array.from({ length: VEINS_INITIAL }, (_, i) => spawnVein(seed, i + 1))
+}
+
 export function newGame(seed = 1, numPlayers = 1, names: string[] = [], phaseTicks?: Partial<PhaseTicks>): SimState {
   const n = Math.max(1, numPlayers)
   return {
@@ -68,7 +95,10 @@ export function newGame(seed = 1, numPlayers = 1, names: string[] = [], phaseTic
     phase: 'round1',
     phaseTicks: { round1: phaseTicks?.round1 ?? 0, round2: phaseTicks?.round2 ?? 0 },
     market: MARKET_BASE,
+    marketCharms: CHARM_MARKET_BASE,
     gremlin: 0,
+    veins: initialVeins(seed),
+    contracts: [],
     players: Array.from({ length: n }, (_, i) => newWorkshop(names[i] ?? `Player ${i + 1}`)),
     events: [],
     eventSeq: 0,
@@ -84,6 +114,10 @@ function newWorkshop(name: string): Workshop {
     matter: 0,
     widgets: 0,
     widgetsSold: 0,
+    charms: 0,
+    charmsSold: 0,
+    contractScore: 0,
+    prospects: [],
     disasters: 0,
     uptime: 0,
     waste: 0,
@@ -115,6 +149,7 @@ function summarize(s: SimState): RoundSummary {
     name: w.name,
     score: score(w),
     widgetsSold: w.widgetsSold,
+    charmsSold: w.charmsSold,
     disasters: w.disasters,
     waste: w.waste,
     uptime: w.uptime,
@@ -140,12 +175,19 @@ function summarize(s: SimState): RoundSummary {
 function reseedRound2(s: SimState): void {
   s.tick = 0
   s.market = MARKET_BASE
+  s.marketCharms = CHARM_MARKET_BASE
   s.gremlin = 0
+  s.veins = initialVeins(s.seed) // the field regrows — same seed, same veins, same spawns
+  s.contracts = [] // round 2 posts its own offers on the same seeded schedule
   for (const w of s.players) {
     w.tokens = TOKEN_START
     w.matter = 0
     w.widgets = 0
     w.widgetsSold = 0
+    w.charms = 0
+    w.charmsSold = 0
+    w.contractScore = 0
+    w.prospects = [] // round-1 surveys described round-1's field
     w.disasters = 0
     w.uptime = 0
     w.waste = 0
@@ -203,7 +245,11 @@ export function validateShape(script: Script): void {
   if (typeof script.verb !== 'string') fail('script.verb must be a string')
   if (typeof script.params !== 'object' || script.params === null || Array.isArray(script.params)) fail('script.params must be an object')
   for (const [k, v] of Object.entries(script.params)) {
-    if (typeof v !== 'number' || !Number.isFinite(v)) fail(`param '${k}' must be a finite number`)
+    // numbers everywhere; short strings admitted for enum params (sell.good) —
+    // a WRONG string ('gold') is representable on purpose: the oracle's catch
+    const okNum = typeof v === 'number' && Number.isFinite(v)
+    const okStr = typeof v === 'string' && v.length >= 1 && v.length <= 16
+    if (!okNum && !okStr) fail(`param '${k}' must be a finite number or a short string`)
   }
   if (script.when !== undefined) {
     const c = script.when
@@ -329,6 +375,40 @@ export function apply(s: SimState, cmd: Command): void {
       emit(s, { t: 'scrapped', player: p, id: cmd.id })
       return
     }
+    case 'prospect': {
+      // the info play: pay to preview the NEXT unsurfaced vein (own-seat data;
+      // the public event says only that a survey happened). Buying again
+      // reveals the one after that.
+      if (s.phase === 'intermission') fail('the world is frozen for the intermission — prospect when the round runs')
+      let k: number | null = null
+      for (let c = VEINS_INITIAL + 1; c <= VEIN_ID_MAX; c++) {
+        if (veinSpec(s.seed, c).spawnTick > s.tick && !w.prospects.includes(c)) {
+          k = c
+          break
+        }
+      }
+      if (k === null) fail('nothing left to prospect — the field is surfaced (or already surveyed)')
+      if (w.tokens < PROSPECT_COST) fail(`not enough tokens (a prospect costs ${PROSPECT_COST})`)
+      w.tokens -= PROSPECT_COST
+      w.prospects.push(k)
+      emit(s, { t: 'prospected', player: p })
+      return
+    }
+    case 'claimContract': {
+      // strategy is the human's: the server routes this through the HINGE only
+      if (s.phase !== 'round2') fail('contracts unlock in round 2 — with the oracle')
+      const c = s.contracts.find((k) => k.id === cmd.id)
+      if (!c) fail(`no contract #${cmd.id} on the board`)
+      if (c.status !== 'open') fail(`contract #${cmd.id} is ${c.status}`)
+      const active = s.contracts.filter((k) => k.status === 'claimed' && k.player === p).length
+      if (active >= CONTRACT_MAX_ACTIVE) fail(`your workshop already holds ${CONTRACT_MAX_ACTIVE} contracts — deliver first`)
+      c.status = 'claimed'
+      c.player = p
+      c.deadline = s.tick + c.windowTicks
+      c.progress = 0
+      emit(s, { t: 'contractClaimed', player: p, id: c.id })
+      return
+    }
     case 'phase': {
       const next = PHASE_NEXT[s.phase]
       if (!next) fail('there is nothing after the reveal')
@@ -346,21 +426,34 @@ export function apply(s: SimState, cmd: Command): void {
 // ── The tick ─────────────────────────────────────────────────────────────────
 
 /** The per-script legibility line: what ran, what it moved, in plain words.
- * Pure function of the deltas — replays reproduce it exactly. */
-function yieldNote(verb: string, dTokens: number, dMatter: number, dWidgets: number, strength: number): string {
-  switch (verb) {
-    case 'harvest':
-      return `+${dMatter} matter`
+ * Pure function of the deltas (+ the bound vein for harvest) — replays
+ * reproduce it exactly. */
+function yieldNote(s: SimState, script: Script, dTokens: number, dMatter: number, dWidgets: number, dCharms: number, strength: number): string {
+  switch (script.verb) {
+    case 'harvest': {
+      if (dMatter > 0) return `+${dMatter} matter from vein #${script.params['node']}`
+      const vein = s.veins.find((v) => v.id === script.params['node'])
+      if (!vein) return `no vein #${script.params['node']} here (yet) — re-target`
+      if (vein.reserve <= 0) return `vein #${vein.id} exhausted — re-target`
+      return '+0 matter'
+    }
     case 'refine':
       return dWidgets > 0 ? `+${dWidgets} widget${dWidgets === 1 ? '' : 's'} (${dMatter} matter)` : `starved — needs ${REFINE_RATIO} matter per widget`
+    case 'craft':
+      return dCharms > 0
+        ? `+${dCharms} charm${dCharms === 1 ? '' : 's'} (${dMatter} matter, ${dWidgets} widgets)`
+        : `starved — needs ${CRAFT_MATTER_PER_CHARM} matter + ${CRAFT_WIDGETS_PER_CHARM} widget per charm`
     case 'sell':
-      return dWidgets < 0 ? `sold ${-dWidgets} → +${dTokens}⚡` : 'nothing to sell'
+      if (dCharms < 0) return `sold ${-dCharms} charm${dCharms === -1 ? '' : 's'} → +${dTokens}⚡`
+      if (dWidgets < 0) return `sold ${-dWidgets} → +${dTokens}⚡`
+      return 'nothing to sell'
     case 'patch':
       return `soaking ${strength} gremlin damage`
     default: {
       const parts: string[] = []
       if (dMatter !== 0) parts.push(`${dMatter > 0 ? '+' : ''}${dMatter} matter`)
       if (dWidgets !== 0) parts.push(`${dWidgets > 0 ? '+' : ''}${dWidgets} widgets`)
+      if (dCharms !== 0) parts.push(`${dCharms > 0 ? '+' : ''}${dCharms} charms`)
       if (dTokens !== 0) parts.push(`${dTokens > 0 ? '+' : ''}${dTokens}⚡`)
       return parts.length ? parts.join(' · ') : 'no effect'
     }
@@ -382,13 +475,53 @@ export function tick(s: SimState): void {
   if (!ticksRunning(s)) return
   s.events = []
   s.tick++
-  // world schedules
+  // world schedules — BASE price drifts (rushes multiply at the point of sale)
   const nextMarket = stepMarket(s.market, s.seed, s.tick)
   if (nextMarket !== s.market) {
     s.market = nextMarket
     emit(s, { t: 'marketShift', market: s.market })
   }
+  const nextCharms = stepCharmMarket(s.marketCharms, s.seed, s.tick)
+  if (nextCharms !== s.marketCharms) {
+    s.marketCharms = nextCharms
+    emit(s, { t: 'charmShift', market: s.marketCharms })
+  }
   s.gremlin = pressureAt(s.tick)
+
+  // vein spawns: the seeded field grows (ids are strictly ordered, so the next
+  // candidate is always veins.length + 1)
+  for (let k = s.veins.length + 1; k <= VEIN_ID_MAX; k++) {
+    const spec = veinSpec(s.seed, k)
+    if (spec.spawnTick > s.tick) break
+    s.veins.push(spawnVein(s.seed, k))
+    emit(s, { t: 'veinSpawned', id: k, rate: spec.rate, reserve: spec.reserveMax })
+  }
+  const veinHadReserve = s.veins.map((v) => v.reserve > 0)
+
+  // contract offers post + expire (round 2 only — round 1 is for learning)
+  if (s.phase === 'round2') {
+    for (let j = s.contracts.length + 1; j <= CONTRACT_ID_MAX; j++) {
+      const spec = contractSpec(s.seed, j)
+      if (spec.offerTick > s.tick) break
+      s.contracts.push({ ...spec, offeredAt: spec.offerTick, status: 'open', player: null, deadline: null, progress: 0 })
+      emit(s, { t: 'contractOffered', id: spec.id, good: spec.good, qty: spec.qty, bonus: spec.bonus })
+    }
+    for (const c of s.contracts) {
+      if (c.status === 'open' && s.tick > c.offeredAt + CONTRACT_OFFER_TTL) {
+        c.status = 'expired'
+        emit(s, { t: 'contractExpired', id: c.id })
+      }
+    }
+  }
+
+  // the EFFECTIVE prices this tick — the rush lands here (and only here; the
+  // sim's stored prices stay base, and the oracle's dry-run never applies it)
+  const world: WorldView = {
+    tick: s.tick,
+    market: effectivePrice(s.seed, s.tick, s.market, 'widgets'),
+    marketCharms: effectivePrice(s.seed, s.tick, s.marketCharms, 'charms'),
+    gremlin: s.gremlin,
+  }
 
   const patchTotals: number[] = []
   const buggyCounts: number[] = []
@@ -425,16 +558,16 @@ export function tick(s: SimState): void {
     let mult = 1
     for (const slot of w.scripts) {
       if (!slot.armed || slot.script.verb !== 'boost') continue
-      if (!condPasses(s, w, slot.script.when)) {
-        slot.lastRun = { tick: s.tick, ran: false, note: 'idle — condition false', dTokens: 0, dMatter: 0, dWidgets: 0 }
+      if (!condPasses(world, w, slot.script.when)) {
+        slot.lastRun = { tick: s.tick, ran: false, note: 'idle — condition false', dTokens: 0, dMatter: 0, dWidgets: 0, dCharms: 0 }
         continue
       }
-      const m = slot.script.params['mult']
+      const m = slot.script.params['mult'] as number
       const roll = hashNoise(s.seed, s.tick, saltOf(`${p}:${slot.script.id}`)) % 65536
       if (roll < (m - 1) * BOOST_RISK_PER_STEP) {
         slot.armed = false
         slot.status = 'blown'
-        slot.lastRun = { tick: s.tick, ran: true, note: 'BLEW UP', dTokens: 0, dMatter: -Math.min(w.matter, BOOST_BLOWUP_MATTER_LOSS), dWidgets: 0 }
+        slot.lastRun = { tick: s.tick, ran: true, note: 'BLEW UP', dTokens: 0, dMatter: -Math.min(w.matter, BOOST_BLOWUP_MATTER_LOSS), dWidgets: 0, dCharms: 0 }
         w.waste += BOOST_BLOWUP_WASTE
         w.disasters++
         w.matter = Math.max(0, w.matter - BOOST_BLOWUP_MATTER_LOSS)
@@ -442,19 +575,21 @@ export function tick(s: SimState): void {
         continue
       }
       mult = Math.max(mult, m)
-      slot.lastRun = { tick: s.tick, ran: true, note: `boost ×${m} live`, dTokens: 0, dMatter: 0, dWidgets: 0 }
+      slot.lastRun = { tick: s.tick, ran: true, note: `boost ×${m} live`, dTokens: 0, dMatter: 0, dWidgets: 0, dCharms: 0 }
       w.uptime += 1
     }
 
     // pass 4: the other verbs execute in slot order (deterministic)
+    const soldW0 = w.widgetsSold
+    const soldC0 = w.charmsSold
     let patchTotal = 0
     let buggy = 0
     for (const slot of w.scripts) {
       if (!slot.armed) continue
       if (slot.yolo) buggy++ // unverified armed scripts are the gremlin's attack surface
       if (slot.script.verb === 'boost') continue // already handled
-      if (!condPasses(s, w, slot.script.when)) {
-        slot.lastRun = { tick: s.tick, ran: false, note: 'idle — condition false', dTokens: 0, dMatter: 0, dWidgets: 0 }
+      if (!condPasses(world, w, slot.script.when)) {
+        slot.lastRun = { tick: s.tick, ran: false, note: 'idle — condition false', dTokens: 0, dMatter: 0, dWidgets: 0, dCharms: 0 }
         continue
       }
       // capture what THIS script moved — the per-script legibility line (a
@@ -462,23 +597,61 @@ export function tick(s: SimState): void {
       const t0 = w.tokens
       const m0 = w.matter
       const g0 = w.widgets
-      patchTotal += runVerb(s, w, slot.script, mult)
+      const c0 = w.charms
+      patchTotal += runVerb(world, w, slot.script, mult, s.veins)
       const dTokens = w.tokens - t0
       const dMatter = w.matter - m0
       const dWidgets = w.widgets - g0
+      const dCharms = w.charms - c0
       slot.lastRun = {
         tick: s.tick,
         ran: true,
-        note: yieldNote(slot.script.verb, dTokens, dMatter, dWidgets, slot.script.params['strength'] ?? 0),
+        note: yieldNote(s, slot.script, dTokens, dMatter, dWidgets, dCharms, (slot.script.params['strength'] as number) ?? 0),
         dTokens,
         dMatter,
         dWidgets,
+        dCharms,
       }
       w.uptime += 1
     }
     patchTotals.push(patchTotal)
     buggyCounts.push(buggy)
+
+    // contract progress: sells of the named good auto-deliver (oldest first)
+    let soldW = w.widgetsSold - soldW0
+    let soldC = w.charmsSold - soldC0
+    for (const c of s.contracts) {
+      if (c.status !== 'claimed' || c.player !== p) continue
+      const avail = c.good === 'widgets' ? soldW : soldC
+      if (avail <= 0) continue
+      const applied = Math.min(avail, c.qty - c.progress)
+      c.progress += applied
+      if (c.good === 'widgets') soldW -= applied
+      else soldC -= applied
+      if (c.progress >= c.qty) {
+        c.status = 'fulfilled'
+        w.contractScore += c.bonus
+        emit(s, { t: 'contractFulfilled', player: p, id: c.id, bonus: c.bonus })
+      }
+    }
   }
+
+  // contract deadlines land AFTER sells (a delivery on the deadline tick counts)
+  for (const c of s.contracts) {
+    if (c.status === 'claimed' && c.deadline !== null && s.tick > c.deadline) {
+      c.status = 'failed'
+      const w = s.players[c.player!]
+      w.contractScore -= c.penalty
+      emit(s, { t: 'contractFailed', player: c.player!, id: c.id, penalty: c.penalty })
+    }
+  }
+
+  // veins that ran dry THIS tick announce it (the map shows the drain live)
+  s.veins.forEach((v, i) => {
+    if (veinHadReserve[i] !== undefined && veinHadReserve[i] && v.reserve <= 0) {
+      emit(s, { t: 'veinExhausted', id: v.id })
+    }
+  })
 
   // gremlin spike: one shared roll; damage lands per workshop — unpatched and
   // YOLO-heavy workshops suffer hardest, and heavy damage CORRUPTS a script.
@@ -513,9 +686,15 @@ export function tick(s: SimState): void {
 
 // ── Scoring ──────────────────────────────────────────────────────────────────
 
-/** widgets SOLD + uptime − waste, weights in balance.ts. */
+/** goods SOLD + uptime + contracts − waste, weights in balance.ts. */
 export function score(w: Workshop): number {
-  return w.widgetsSold * SCORE_PER_WIDGET + w.uptime * SCORE_PER_UPTIME - w.waste * SCORE_WASTE_MULT
+  return (
+    w.widgetsSold * SCORE_PER_WIDGET +
+    w.charmsSold * SCORE_PER_CHARM +
+    w.uptime * SCORE_PER_UPTIME +
+    w.contractScore -
+    w.waste * SCORE_WASTE_MULT
+  )
 }
 
 // ── Replay identity helpers ──────────────────────────────────────────────────
@@ -528,7 +707,10 @@ export function snap(s: SimState): string {
     phase: s.phase,
     phaseTicks: s.phaseTicks,
     market: s.market,
+    marketCharms: s.marketCharms,
     gremlin: s.gremlin,
+    veins: s.veins,
+    contracts: s.contracts,
     players: s.players,
     round1Summary: s.round1Summary,
     round2Summary: s.round2Summary,

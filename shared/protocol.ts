@@ -5,7 +5,21 @@
 // only to their own seat.
 
 import type { OracleReport } from './sim/oracle.ts'
-import type { DraftTier, PendingDraft, Phase, RevealDelta, RoundSummary, Script, ScriptSlot, SimEvent, SimPhase, SlotStatus } from './sim/types.ts'
+import type {
+  ContractStatus,
+  DraftTier,
+  Good,
+  PendingDraft,
+  Phase,
+  RevealDelta,
+  RoundSummary,
+  Script,
+  ScriptSlot,
+  SimEvent,
+  SimPhase,
+  SlotStatus,
+  VeinState,
+} from './sim/types.ts'
 
 export interface LobbyPlayer {
   index: number
@@ -16,13 +30,20 @@ export interface LobbyPlayer {
   agentSeenAgoMs: number | null
 }
 
-/** What EVERYONE may see of a script: existence and fate, never the body. */
+/** What EVERYONE may see of a script: existence and fate, never the body —
+ * EXCEPT an armed script's verb + vein binding: a deployed unit is physically
+ * on the map (the board renders its workers), like an RTS. Params and
+ * conditions stay hand-private always. */
 export interface PublicScriptView {
   id: string
   status: SlotStatus
   armed: boolean
   yolo: boolean
   verdictOk: boolean | null
+  /** The armed script's verb — null while it sits un-armed in the hand. */
+  verb: string | null
+  /** Armed harvest only: the vein it's bound to (the map's worker lines). */
+  node: number | null
 }
 
 export interface PlayerView {
@@ -37,10 +58,48 @@ export interface PlayerView {
   matter: number
   widgets: number
   widgetsSold: number
+  charms: number
+  charmsSold: number
+  contractScore: number
   disasters: number
   uptime: number
   waste: number
   scripts: PublicScriptView[]
+}
+
+/** A contract as every surface sees it (offers are public; progress too —
+ * the room watches a delivery race like it watches the scoreboard). */
+export interface ContractView {
+  id: number
+  good: Good
+  qty: number
+  windowTicks: number
+  bonus: number
+  penalty: number
+  status: ContractStatus
+  player: number | null
+  deadline: number | null
+  progress: number
+}
+
+/** The RUSH banner — RICH (human) surfaces only: board + phones over ws.
+ * The agent's HTTP /state never carries it (CORE IDENTITY #2 — the human
+ * holds the map). */
+export interface RushView {
+  good: Good
+  mult: number
+  ticksLeft: number // inclusive of the current tick
+}
+
+/** An own-seat vein preview bought with `prospect` — spec of a vein that has
+ * not surfaced yet. */
+export interface ProspectView {
+  id: number
+  spawnsInTicks: number
+  x: number
+  y: number
+  rate: number
+  reserveMax: number
 }
 
 /** One redacted room snapshot. `you` is present only for a seated recipient
@@ -62,8 +121,21 @@ export interface RoomView {
   /** ms until the next world tick fires (null = the world holds still) — the
    * wall-clock round countdown anchors on this. */
   nextTickInMs: number | null
+  /** CURRENT effective price per widget (rush already applied — by design the
+   * number alone doesn't say whether a rush is on; the board does). */
   market: number
+  /** CURRENT effective price per charm (same rule). */
+  marketCharms: number
   gremlin: number
+  /** The shared map's matter veins — public on every surface. */
+  veins: VeinState[]
+  /** Contract offers + claims — public on every surface (claiming is hinge-only). */
+  contracts: ContractView[]
+  /** RICH (ws/human) surfaces only: the rush banner. ABSENT from HTTP /state —
+   * the asymmetry is structural, not cosmetic. */
+  rush?: RushView | null
+  /** RICH surfaces only: ticks until the next rush window opens (board forecast). */
+  nextRushInTicks?: number
   events: SimEvent[]
   eventSeq: number // total events ever — the feed's dedup watermark (eventFeed.ts)
   players: PlayerView[]
@@ -73,8 +145,9 @@ export interface RoomView {
   /** 'live' = a real model is wired (APPRENTICE_BASE_URL); 'practice' = the
    * seeded offline generator stands in (dev / un-wired deploys). */
   apprentice: 'live' | 'practice'
-  /** `pending` = your own in-flight draft requests (the "drafting…" slots). */
-  you: { index: number; hand: ScriptSlot[]; pending: PendingDraft[] } | null
+  /** `pending` = your own in-flight draft requests (the "drafting…" slots);
+   * `prospects` = the vein previews this seat has paid for (own-seat info). */
+  you: { index: number; hand: ScriptSlot[]; pending: PendingDraft[]; prospects: ProspectView[] } | null
 }
 
 export type ClientMessage =
@@ -89,6 +162,8 @@ export type ClientMessage =
   | { type: 'arm'; token: string; id: string } // HINGE token ONLY
   | { type: 'disarm'; token: string; id: string } // HINGE token (script-lifecycle control, D4)
   | { type: 'scrap'; token: string; id: string } // either token (freeing a slot is safe)
+  | { type: 'prospect'; token: string } // either token — paid vein preview (own-seat info)
+  | { type: 'claimContract'; token: string; id: number } // HINGE token — strategy is the human's
   | { type: 'ping' }
 
 /** GET /api/room/:pin/log — the command log + seed (replay theater's feed).

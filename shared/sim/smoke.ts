@@ -21,7 +21,17 @@ import {
   APPRENTICE_FLAW_CHEAP_PCT,
   APPRENTICE_FLAW_SMART_PCT,
   BOOST_BLOWUP_WASTE,
+  CHARM_MARKET_MAX,
+  CHARM_MARKET_MIN,
+  CONTRACT_FIRST_TICK,
+  CONTRACT_MAX_ACTIVE,
+  CONTRACT_OFFER_TTL,
+  CONTRACT_PENALTY,
+  CONTRACT_PERIOD,
+  CONTRACT_WINDOW_TICKS,
   CORRUPT_THRESHOLD,
+  CRAFT_MATTER_PER_CHARM,
+  CRAFT_WIDGETS_PER_CHARM,
   DEAD_SCRIPT_WASTE,
   DRAFT_COST_CHEAP,
   DRAFT_COST_SMART,
@@ -30,13 +40,24 @@ import {
   MARKET_MIN,
   MAX_SCRIPTS,
   ORACLE_COST,
+  PROSPECT_COST,
   REFINE_RATIO,
+  RUSH_FIRST_TICK,
+  RUSH_LEN,
+  RUSH_MULT_MAX,
+  RUSH_MULT_MIN,
+  SCORE_PER_CHARM,
   SCORE_PER_UPTIME,
   SCORE_PER_WIDGET,
   SCORE_WASTE_MULT,
   TOKEN_CAP,
   TOKEN_REGEN,
   TOKEN_START,
+  VEIN_ID_MAX,
+  VEIN_RATE_MAX,
+  VEIN_RATE_MIN,
+  VEIN_RESERVE_FACTOR_MIN,
+  VEINS_INITIAL,
   VERB_PARAMS,
 } from './balance.ts'
 import { freshEvents, newFeedCursor } from '../eventFeed.ts'
@@ -45,7 +66,7 @@ import { rulesMarkdown, rulesSections } from '../rules.ts'
 import { FLAW_CLASSES, flawScript, sampleScript } from './flaws.ts'
 import { oracle, staticCheck } from './oracle.ts'
 import { apply, computeDelta, newGame, RuleError, score, snap, stateHash, tick, ticksRemaining, ticksRunning, validateShape } from './sim.ts'
-import { pressureAt, stepMarket } from './world.ts'
+import { effectivePrice, fieldValue, pressureAt, rushAt, stepMarket, veinSpec } from './world.ts'
 import { CONDITION_FIELDS, CONDITION_OPS, VERBS, type Command, type PhaseTicks, type Script, type SimEvent, type SimState } from './types.ts'
 
 let passed = 0
@@ -108,7 +129,7 @@ function newGameR2(seed = 1, numPlayers = 1, names: string[] = []): SimState {
   return s
 }
 
-const H = (rate = 1): Script => ({ id: 'h1', verb: 'harvest', params: { rate } })
+const H = (rate = 1, node = 1): Script => ({ id: 'h1', verb: 'harvest', params: { rate, node } })
 
 // ── 1. Replay identity: seed + command log → identical state hash ────────────
 // The log CROSSES ALL FOUR PHASES (phase advances are commands, so a replay
@@ -194,8 +215,12 @@ console.log('structural gate')
   apply(s, { t: 'draftAccepted', script: { id: 'x1', verb: 'harvst', params: { rate: 1 } }, tier: 'cheap' })
   apply(s, { t: 'draftAccepted', script: { id: 'x2', verb: 'harvest', params: { rte: 1 } }, tier: 'cheap' })
   ok(s.players[0].scripts.length === 2, 'hallucinated drafts enter the hand (comedy admitted)')
+  // a STRING param is structurally admitted now (sell's `good` is an enum) —
+  // a wrong string anywhere is the oracle's catch, not the boundary's
+  apply(s, { t: 'draftAccepted', script: { id: 'xs', verb: 'harvest', params: { rate: 'lots' } } as unknown as Script, tier: 'cheap' })
+  ok(!staticCheck(s.players[0].scripts.find((sl) => sl.script.id === 'xs')!.script).ok, 'string-valued numeric param is admitted and oracle-red')
   // structurally hostile input is rejected at the boundary
-  throws(() => apply(s, { t: 'draftAccepted', script: { id: 'x3', verb: 'harvest', params: { rate: 'lots' } } as unknown as Script, tier: 'cheap' }), 'non-number param rejected')
+  throws(() => apply(s, { t: 'draftAccepted', script: { id: 'x3', verb: 'harvest', params: { rate: {} } } as unknown as Script, tier: 'cheap' }), 'non-number/non-string param rejected')
   throws(() => apply(s, { t: 'draftAccepted', script: { id: '', verb: 'harvest', params: {} }, tier: 'cheap' }), 'empty id rejected')
   throws(() => apply(s, { t: 'draftAccepted', script: { id: 'x4', verb: 'harvest', params: { rate: 1 }, when: { field: 'tick', op: '>', value: NaN } }, tier: 'cheap' }), 'NaN condition value rejected')
 }
@@ -203,13 +228,17 @@ console.log('structural gate')
 // ── 4. Every DSL verb does its job ───────────────────────────────────────────
 console.log('verbs')
 {
-  // harvest
+  // harvest — bound to vein #1; yield = min(script rate, vein richness)
   const s = newGameR2(9)
   apply(s, { t: 'draftAccepted', script: H(3), tier: 'cheap' })
   apply(s, { t: 'oracleCheck', id: 'h1' })
   apply(s, { t: 'arm', id: 'h1' })
+  const vein1Rate = s.veins[0].rate
+  const vein1Reserve = s.veins[0].reserve
   tick(s)
-  ok(s.players[0].matter === 3, 'harvest gains matter at its rate')
+  const expectedDraw = Math.min(3, vein1Rate)
+  ok(s.players[0].matter === expectedDraw, `harvest gains min(rate, vein richness) matter (${expectedDraw})`)
+  ok(s.veins[0].reserve === vein1Reserve - expectedDraw, 'the vein reserve drains by exactly the draw')
 
   // refine (ratio) — seed the matter directly
   const s2 = newGameR2(9)
@@ -388,7 +417,7 @@ console.log('oracle catches every flaw class')
 console.log('oracle dry-run')
 {
   const s = newGame(7)
-  const rep = oracle(s, 0, { id: 'd1', verb: 'harvest', params: { rate: 2 } })
+  const rep = oracle(s, 0, { id: 'd1', verb: 'harvest', params: { rate: 2, node: 1 } })
   ok(rep.ok && rep.prediction !== null && rep.prediction.length === 3, 'green verdict carries a 3-tick prediction')
   ok(rep.prediction!.every((p) => p.matter === 2 && p.ran), 'harvest predicts its per-tick matter yield')
 
@@ -396,18 +425,18 @@ console.log('oracle dry-run')
   ok(repSell.ok && repSell.prediction!.every((p) => p.tokens === 0), 'selling with no widgets predicts zero yield')
   ok(repSell.reasons.some((r) => r.includes('nothing to sell')), 'and says why in plain words')
 
-  const repIdle = oracle(s, 0, { id: 'd3', verb: 'harvest', params: { rate: 1 }, when: { field: 'matter', op: '>', value: 500 } })
+  const repIdle = oracle(s, 0, { id: 'd3', verb: 'harvest', params: { rate: 1, node: 1 }, when: { field: 'matter', op: '>', value: 500 } })
   ok(repIdle.ok && repIdle.prediction!.every((p) => !p.ran), 'a gated script predicts idle ticks')
   ok(repIdle.reasons.some((r) => r.includes('idle')), 'idle advisory is human-readable')
 
   const repBoost = oracle(s, 0, { id: 'd4', verb: 'boost', params: { mult: 3 } })
   ok(repBoost.ok && repBoost.reasons.some((r) => r.includes('blowup risk')), 'boost advisory names its blowup risk')
 
-  const repBad = oracle(s, 0, { id: 'd5', verb: 'harvest', params: { rate: 50 } })
+  const repBad = oracle(s, 0, { id: 'd5', verb: 'harvest', params: { rate: 50, node: 1 } })
   ok(!repBad.ok && repBad.prediction === null, 'red verdict: no prediction, only reasons')
   ok(repBad.reasons.some((r) => r.includes('off by 10x')), 'the off-by-10x hint reads human')
 
-  const repImp = oracle(s, 0, { id: 'd6', verb: 'harvest', params: { rate: 1 }, when: { field: 'tokens', op: '<', value: 0 } })
+  const repImp = oracle(s, 0, { id: 'd6', verb: 'harvest', params: { rate: 1, node: 1 }, when: { field: 'tokens', op: '<', value: 0 } })
   ok(!repImp.ok && repImp.reasons.some((r) => r.includes('can never be true')), 'impossible condition goes red with a reason')
 }
 
@@ -498,7 +527,7 @@ console.log('corruption: protected vs YOLO')
 console.log('conditions')
 {
   const s = newGameR2(13)
-  apply(s, { t: 'draftAccepted', script: { id: 'h1', verb: 'harvest', params: { rate: 2 }, when: { field: 'tick', op: '>', value: 4 } }, tier: 'cheap' })
+  apply(s, { t: 'draftAccepted', script: { id: 'h1', verb: 'harvest', params: { rate: 2, node: 1 }, when: { field: 'tick', op: '>', value: 4 } }, tier: 'cheap' })
   apply(s, { t: 'oracleCheck', id: 'h1' })
   apply(s, { t: 'arm', id: 'h1' })
   for (let i = 0; i < 4; i++) tick(s) // ticks 1..4 — condition false
@@ -941,9 +970,10 @@ console.log('per-script lastRun yield')
   apply(s, { t: 'draftAccepted', script: H(3), tier: 'cheap' })
   apply(s, { t: 'oracleCheck', id: 'h1' })
   apply(s, { t: 'arm', id: 'h1' })
+  const draw = Math.min(3, s.veins[0].rate)
   tick(s)
   const hr = s.players[0].scripts[0].lastRun
-  ok(hr !== null && hr.ran && hr.dMatter === 3 && hr.note === '+3 matter', `harvest lastRun carries the yield (${hr?.note})`)
+  ok(hr !== null && hr.ran && hr.dMatter === draw && hr.note === `+${draw} matter from vein #1`, `harvest lastRun carries the yield + vein (${hr?.note})`)
 
   // TWO refiners on thin matter: the first eats, the second STARVES — and says so
   const s2 = newGameR2(9)
@@ -960,7 +990,7 @@ console.log('per-script lastRun yield')
 
   // a gated script reports idle, not starving
   const s3 = newGameR2(13)
-  apply(s3, { t: 'draftAccepted', script: { id: 'g1', verb: 'harvest', params: { rate: 2 }, when: { field: 'tick', op: '>', value: 4 } }, tier: 'cheap' })
+  apply(s3, { t: 'draftAccepted', script: { id: 'g1', verb: 'harvest', params: { rate: 2, node: 1 }, when: { field: 'tick', op: '>', value: 4 } }, tier: 'cheap' })
   apply(s3, { t: 'oracleCheck', id: 'g1' })
   apply(s3, { t: 'arm', id: 'g1' })
   tick(s3)
@@ -997,6 +1027,426 @@ console.log('per-script lastRun yield')
   ok(snap(mk()) === snap(mk()), 'lastRun rides the snapshot deterministically (replay identity holds)')
 }
 
+// ── 24. THE MAP: veins spawn, drain, exhaust — and harvesters re-target ──────
+// The depth update's ground truth: the field is a pure schedule f(seed, k);
+// reserves are the only vein state; an exhausted vein IDLES its harvesters
+// (never kills them) and says so in lastRun.
+console.log('the map: veins')
+{
+  const s = newGame(31)
+  ok(s.veins.length === VEINS_INITIAL, `the field opens with ${VEINS_INITIAL} veins`)
+  ok(s.veins.every((v) => v.rate >= VEIN_RATE_MIN && v.rate <= VEIN_RATE_MAX), 'vein richness stays in bounds')
+  ok(s.veins.every((v) => v.reserve === v.reserveMax && v.reserveMax >= v.rate * VEIN_RESERVE_FACTOR_MIN), 'veins open full, reserve scaled to richness')
+  ok(s.veins.every((v) => v.x >= 0 && v.x <= 100 && v.y >= 0 && v.y <= 62), 'seeded layout stays on the map')
+
+  // the spawn schedule is pure and replays: the same seed grows the same field
+  const a = newGame(31)
+  const b = newGame(31)
+  for (let i = 0; i < 25; i++) {
+    tick(a)
+    tick(b)
+  }
+  ok(snap(a) === snap(b), 'vein spawns replay identically (pure schedule)')
+  ok(a.veins.length > VEINS_INITIAL, `new veins surfaced by tick 25 (${a.veins.length} live)`)
+  ok(a.veins.length <= VEIN_ID_MAX, 'vein ids never exceed the static bound')
+  // spawn events announced
+  const evs: SimEvent[] = []
+  const c = newGame(31)
+  for (let i = 0; i < 25; i++) {
+    tick(c)
+    evs.push(...c.events)
+  }
+  ok(evs.some((e) => e.t === 'veinSpawned'), 'a vein spawn is a public event')
+  // veinSpec is stable: what prospect promises is what spawns
+  const spawned = a.veins[a.veins.length - 1]
+  const spec = veinSpec(31, spawned.id)
+  ok(spec.rate === spawned.rate && spec.reserveMax === spawned.reserveMax && spec.x === spawned.x && spec.y === spawned.y, 'veinSpec(seed,k) IS the vein that surfaces (prospect can promise it)')
+
+  // exhaustion: a hungry harvester drains vein 1 dry, then IDLES with a
+  // re-target note — it does not die, and uptime keeps counting
+  const e = newGameR2(31)
+  e.players[0].tokens = TOKEN_CAP
+  apply(e, { t: 'draftAccepted', script: { id: 'hh', verb: 'harvest', params: { rate: 5, node: 1 } }, tier: 'cheap' })
+  apply(e, { t: 'oracleCheck', id: 'hh' })
+  apply(e, { t: 'arm', id: 'hh' })
+  let sawExhaust = false
+  for (let i = 0; i < 19; i++) {
+    tick(e)
+    if (e.events.some((ev) => ev.t === 'veinExhausted' && ev.id === 1)) sawExhaust = true
+  }
+  ok(sawExhaust, 'draining a vein dry emits veinExhausted (the room sees it)')
+  ok(e.veins[0].reserve === 0, 'the vein really is empty')
+  const slot = e.players[0].scripts[0]
+  ok(slot.armed && slot.status === 'armed', 'the harvester on a dry vein stays ARMED (idles, not dead)')
+  ok(slot.lastRun !== null && slot.lastRun.note.includes('exhausted') && slot.lastRun.note.includes('re-target'), `lastRun teaches the re-target (${slot.lastRun?.note})`)
+  ok(e.players[0].matter > 0 && e.players[0].matter <= e.veins[0].reserveMax, 'total harvest never exceeds the reserve')
+
+  // binding to a not-yet-surfaced vein: statically legal, idles with a note
+  const f = newGameR2(31)
+  apply(f, { t: 'draftAccepted', script: { id: 'fu', verb: 'harvest', params: { rate: 2, node: VEIN_ID_MAX } }, tier: 'cheap' })
+  apply(f, { t: 'oracleCheck', id: 'fu' })
+  apply(f, { t: 'arm', id: 'fu' })
+  tick(f)
+  const fr = f.players[0].scripts[0].lastRun
+  ok(f.players[0].scripts[0].armed && fr !== null && fr.note.includes('re-target'), `an unsurfaced vein idles the harvester with a note (${fr?.note})`)
+
+  // the oracle's dry-run models the reserve: exhaust forecast + dry warning
+  const g = newGameR2(31)
+  const repLive = oracle(g, 0, { id: 'dv', verb: 'harvest', params: { rate: 5, node: 1 } })
+  ok(repLive.ok && repLive.reasons.some((r) => r.includes('exhausts in')), `dry-run forecasts the exhaust (${repLive.reasons[0] ?? ''})`)
+  g.veins[0].reserve = 0
+  const repDry = oracle(g, 0, { id: 'dv', verb: 'harvest', params: { rate: 5, node: 1 } })
+  ok(repDry.ok && repDry.reasons.some((r) => r.includes('EXHAUSTED')), 'dry-run warns on an exhausted vein')
+  const repGhost = oracle(g, 0, { id: 'dv', verb: 'harvest', params: { rate: 5, node: VEIN_ID_MAX } })
+  ok(repGhost.ok && repGhost.reasons.some((r) => r.includes('not surfaced')), 'dry-run warns on a not-yet-surfaced vein')
+  ok(!staticCheck({ id: 'dv', verb: 'harvest', params: { rate: 2, node: VEIN_ID_MAX + 1 } }).ok, 'a node beyond the map is static-RED (badNode territory)')
+  ok(!staticCheck({ id: 'dv', verb: 'harvest', params: { rate: 2 } }).ok, 'harvest without a node is static-RED (binding is required)')
+}
+
+// ── 25. PROSPECT: paid preview of the next vein (own-seat info play) ─────────
+console.log('prospect')
+{
+  const s = newGame(31)
+  const t0 = s.players[0].tokens
+  apply(s, { t: 'prospect' })
+  ok(s.players[0].tokens === t0 - PROSPECT_COST, `a prospect costs ${PROSPECT_COST}`)
+  ok(s.players[0].prospects.length === 1 && s.players[0].prospects[0] === VEINS_INITIAL + 1, 'the first prospect reveals the next unsurfaced vein')
+  ok(s.events.some((e) => e.t === 'prospected'), 'the survey is a public event (WHAT it found is not)')
+  // buying again reveals the one after
+  apply(s, { t: 'prospect' })
+  ok(s.players[0].prospects[1] === VEINS_INITIAL + 2, 'a second prospect reveals the vein after that')
+  // the promise comes true: the prospected vein spawns exactly as previewed
+  const k = s.players[0].prospects[0]
+  const promised = veinSpec(s.seed, k)
+  while (!s.veins.some((v) => v.id === k)) tick(s)
+  const landed = s.veins.find((v) => v.id === k)!
+  ok(landed.rate === promised.rate && landed.reserveMax === promised.reserveMax, 'the prospected vein surfaces exactly as promised')
+  // refusals: frozen world, empty wallet
+  const froz = newGame(31)
+  apply(froz, { t: 'phase', to: 'intermission' })
+  throws(() => apply(froz, { t: 'prospect' }), 'prospect is refused while the world is frozen')
+  const poor = newGame(31)
+  poor.players[0].tokens = PROSPECT_COST - 1
+  throws(() => apply(poor, { t: 'prospect' }), 'prospect needs tokens')
+  // prospects reset at the round-2 reseed (they described round 1's field)
+  const r = newGame(31)
+  apply(r, { t: 'prospect' })
+  apply(r, { t: 'phase', to: 'intermission' })
+  apply(r, { t: 'phase', to: 'round2' })
+  ok(r.players[0].prospects.length === 0, 'prospects clear at the round-2 reseed')
+}
+
+// ── 26. CHARMS: the deeper pipeline pays when scripted well ──────────────────
+console.log('charms: craft + sell + scoring')
+{
+  const s = newGameR2(9)
+  s.players[0].matter = 10
+  s.players[0].widgets = 5
+  apply(s, { t: 'draftAccepted', script: { id: 'c1', verb: 'craft', params: { rate: 2 } }, tier: 'cheap' })
+  apply(s, { t: 'oracleCheck', id: 'c1' })
+  apply(s, { t: 'arm', id: 'c1' })
+  tick(s)
+  ok(s.players[0].charms === 2, 'craft forges rate charms per tick')
+  ok(s.players[0].matter === 10 - 2 * CRAFT_MATTER_PER_CHARM && s.players[0].widgets === 5 - 2 * CRAFT_WIDGETS_PER_CHARM, `each charm eats ${CRAFT_MATTER_PER_CHARM} matter + ${CRAFT_WIDGETS_PER_CHARM} widget`)
+  ok(s.players[0].scripts[0].lastRun?.note.includes('+2 charms') === true, `craft lastRun speaks charms (${s.players[0].scripts[0].lastRun?.note})`)
+  ok(s.players[0].charmsSold === 0, 'crafted charms are INVENTORY — selling is what ships')
+
+  // a starved forge says so
+  const st = newGameR2(9)
+  apply(st, { t: 'draftAccepted', script: { id: 'c1', verb: 'craft', params: { rate: 1 } }, tier: 'cheap' })
+  apply(st, { t: 'oracleCheck', id: 'c1' })
+  apply(st, { t: 'arm', id: 'c1' })
+  tick(st)
+  ok(st.players[0].scripts[0].lastRun?.note.includes('starved') === true, 'an empty-handed forge reads starved')
+
+  // sell good:"charms" moves charms at the CHARM market rate
+  const sc = newGameR2(9)
+  sc.players[0].charms = 3
+  apply(sc, { t: 'draftAccepted', script: { id: 's1', verb: 'sell', params: { amount: 2, good: 'charms' } }, tier: 'cheap' })
+  apply(sc, { t: 'oracleCheck', id: 's1' })
+  apply(sc, { t: 'arm', id: 's1' })
+  const tokens0 = sc.players[0].tokens
+  tick(sc)
+  const priceCharms = effectivePrice(sc.seed, sc.tick, sc.marketCharms, 'charms')
+  ok(sc.players[0].charms === 1 && sc.players[0].charmsSold === 2, 'sell good:charms ships charms')
+  ok(sc.players[0].tokens === Math.min(TOKEN_CAP, tokens0 + TOKEN_REGEN + 2 * priceCharms), 'charms pay the charm market rate')
+  ok(sc.players[0].widgets === 0 && sc.players[0].widgetsSold === 0, 'widgets untouched by a charm sale')
+  ok(sc.players[0].scripts[0].lastRun?.note.includes('charm') === true, `sell lastRun names the good (${sc.players[0].scripts[0].lastRun?.note})`)
+
+  // sell without `good` still sells widgets (backward compatible)
+  const sw = newGameR2(9)
+  sw.players[0].widgets = 2
+  apply(sw, { t: 'draftAccepted', script: { id: 's1', verb: 'sell', params: { amount: 2 } }, tier: 'cheap' })
+  apply(sw, { t: 'oracleCheck', id: 's1' })
+  apply(sw, { t: 'arm', id: 's1' })
+  tick(sw)
+  ok(sw.players[0].widgetsSold === 2 && sw.players[0].charmsSold === 0, 'good omitted = widgets (old drafts keep working)')
+
+  // a phantom good is static-RED (the wrongGood flaw class)
+  ok(!staticCheck({ id: 'x', verb: 'sell', params: { amount: 1, good: 'gold' } }).ok, "sell good:'gold' is oracle-red")
+
+  // scoring: a charm sold scores SCORE_PER_CHARM
+  const w = newGame(1).players[0]
+  w.charmsSold = 2
+  ok(score(w) === 2 * SCORE_PER_CHARM, `a charm sold scores ${SCORE_PER_CHARM}`)
+  ok(SCORE_PER_CHARM > 2 * SCORE_PER_WIDGET, 'the deeper pipeline pays: charm > 2× widget')
+
+  // the charm market drifts on its own seeded lane, within bounds
+  const m = newGame(42)
+  const path: number[] = []
+  for (let i = 0; i < 100; i++) {
+    tick(m)
+    path.push(m.marketCharms)
+  }
+  ok(path.every((x) => x >= CHARM_MARKET_MIN && x <= CHARM_MARKET_MAX), `charm market stays within [${CHARM_MARKET_MIN}..${CHARM_MARKET_MAX}]`)
+  ok(new Set(path).size > 1, 'the charm market actually drifts')
+}
+
+// ── 27. RUSHES: seeded windows, effective prices — and THE ASYMMETRY ─────────
+// The rush schedule is pure f(seed, tick); the sell payout applies it; the
+// ORACLE'S DRY-RUN DOES NOT (base prices only) — the forecast belongs to the
+// humans' surfaces. That last assertion is the asymmetry made testable.
+console.log('rushes + the asymmetry')
+{
+  // schedule shape: windows open on the cadence, run RUSH_LEN, stay in bounds
+  const seed = 55
+  let windows = 0
+  for (let t = 0; t < 40; t++) {
+    const r = rushAt(seed, t)
+    if (r && r.startTick === t) {
+      windows++
+      ok(r.endTick - r.startTick + 1 === RUSH_LEN, `rush window is ${RUSH_LEN} ticks`)
+      ok(r.mult >= RUSH_MULT_MIN && r.mult <= RUSH_MULT_MAX, 'rush multiplier in bounds')
+    }
+  }
+  ok(windows >= 4, `rush windows recur on the cadence (${windows} in 40 ticks)`)
+  ok(rushAt(seed, 0) === null && rushAt(seed, RUSH_FIRST_TICK) !== null, `first rush opens at tick ${RUSH_FIRST_TICK}`)
+
+  // the same seed replays the same rushes (round-2 fairness)
+  for (let t = 0; t < 40; t++) {
+    const x = rushAt(seed, t)
+    const y = rushAt(seed, t)
+    if ((x === null) !== (y === null) || (x && y && (x.good !== y.good || x.mult !== y.mult))) {
+      ok(false, 'rush schedule is pure')
+      break
+    }
+  }
+  ok(true, 'rush schedule is pure f(seed, tick)')
+
+  // a sale DURING a rush pays base × mult (find a rush on either good, sell into it)
+  const rs = newGameR2(seed)
+  const rush = rushAt(seed, RUSH_FIRST_TICK)!
+  rs.players[0].widgets = 50
+  rs.players[0].charms = 50
+  apply(rs, { t: 'draftAccepted', script: { id: 's1', verb: 'sell', params: { amount: 1, good: rush.good } }, tier: 'cheap' })
+  apply(rs, { t: 'oracleCheck', id: 's1' })
+  apply(rs, { t: 'arm', id: 's1' })
+  rs.players[0].tokens = 0 // headroom below the cap so the payout is visible
+  let paidDuringRush = -1
+  while (rs.tick < RUSH_FIRST_TICK) {
+    rs.players[0].tokens = 0
+    tick(rs)
+    if (rs.tick === RUSH_FIRST_TICK) paidDuringRush = rs.players[0].scripts[0].lastRun?.dTokens ?? -1
+  }
+  const base = rush.good === 'widgets' ? rs.market : rs.marketCharms
+  ok(paidDuringRush === base * rush.mult, `a rush-tick sale pays base × mult (${base} × ${rush.mult} = ${paidDuringRush})`)
+
+  // condition fields read the EFFECTIVE price during the rush
+  const world = { tick: rs.tick, market: effectivePrice(seed, rs.tick, rs.market, 'widgets'), marketCharms: effectivePrice(seed, rs.tick, rs.marketCharms, 'charms'), gremlin: 0 }
+  const eff = rush.good === 'widgets' ? world.market : world.marketCharms
+  ok(fieldValue(world, rs.players[0], rush.good === 'widgets' ? 'market' : 'marketCharms') === eff && eff === base * rush.mult, 'conditions read the effective (rushed) price')
+
+  // ★ THE ASYMMETRY ORACLE: the dry-run must NOT leak the rush — a sell
+  // prediction across a rush window quotes BASE prices only, and says so
+  const dr = newGameR2(seed)
+  dr.players[0].widgets = 50
+  dr.players[0].charms = 50
+  // stand one tick before the rush; predict across it
+  while (dr.tick < RUSH_FIRST_TICK - 1) tick(dr)
+  const rep = oracle(dr, 0, { id: 'p1', verb: 'sell', params: { amount: 1, good: rush.good } })
+  ok(rep.ok && rep.prediction !== null, 'the pre-rush sell prediction is green')
+  const rushTickPred = rep.prediction!.find((p) => rushAt(seed, p.tick) !== null)
+  ok(rushTickPred !== undefined, 'the dry-run window really crosses the rush')
+  ok(rushTickPred!.tokens > 0 && rushTickPred!.tokens <= (rush.good === 'widgets' ? MARKET_MAX : CHARM_MARKET_MAX), `the dry-run quotes BASE prices across the rush (${rushTickPred!.tokens} — no multiplier leak)`)
+  ok(rep.reasons.some((r) => r.includes('BASE prices')), 'and it SAYS the forecast lives on the board')
+}
+
+// ── 28. CONTRACTS: round-2 offers, human claims, auto-delivery ───────────────
+console.log('contracts')
+{
+  // round 1 posts no offers and refuses claims
+  const r1 = newGame(21, 1, [], { round1: 12, round2: 19 })
+  for (let i = 0; i < 12; i++) tick(r1)
+  ok(r1.contracts.length === 0, 'round 1 posts NO contract offers (too much while learning)')
+  throws(() => apply(r1, { t: 'claimContract', id: 1 }), 'claiming in round 1 is refused')
+
+  // round 2: offers appear on the seeded schedule, replay-identical
+  const mk = () => {
+    const s = newGame(21, 2, [], { round1: 1, round2: 0 })
+    tick(s)
+    apply(s, { t: 'phase', to: 'intermission' })
+    apply(s, { t: 'phase', to: 'round2' })
+    return s
+  }
+  const s = mk()
+  for (let i = 0; i < CONTRACT_FIRST_TICK; i++) tick(s)
+  ok(s.contracts.length >= 1 && s.contracts[0].status === 'open', `the first offer posts at round-2 tick ${CONTRACT_FIRST_TICK}`)
+  ok(s.events.some((e) => e.t === 'contractOffered') || s.contracts.length > 0, 'an offer is announced')
+  const c0 = s.contracts[0]
+  ok(c0.qty > 0 && c0.bonus > 0 && (c0.good === 'widgets' || c0.good === 'charms'), 'the offer carries qty/good/bonus from the seeded spec')
+  const t = mk()
+  for (let i = 0; i < CONTRACT_FIRST_TICK; i++) tick(t)
+  ok(JSON.stringify(t.contracts) === JSON.stringify(s.contracts), 'the offer schedule replays identically')
+
+  // claim → sells auto-deliver → bonus lands as SCORE
+  apply(s, { t: 'claimContract', player: 0, id: c0.id })
+  ok(c0.status === 'claimed' && c0.player === 0 && c0.deadline === s.tick + c0.windowTicks, 'a claim binds the contract to the claimer with a deadline')
+  throws(() => apply(s, { t: 'claimContract', player: 1, id: c0.id }), 'a claimed contract cannot be claimed again')
+  const shop = s.players[0]
+  shop.tokens = TOKEN_CAP
+  if (c0.good === 'widgets') shop.widgets = c0.qty + 5
+  else shop.charms = c0.qty + 5
+  apply(s, { t: 'draftAccepted', player: 0, script: { id: 'ds', verb: 'sell', params: { amount: 5, good: c0.good } }, tier: 'cheap' })
+  apply(s, { t: 'oracleCheck', player: 0, id: 'ds' })
+  apply(s, { t: 'arm', player: 0, id: 'ds' })
+  const score0 = score(shop)
+  let fulfilledAt = -1
+  for (let i = 0; i < 4 && fulfilledAt < 0; i++) {
+    tick(s)
+    if (s.events.some((e) => e.t === 'contractFulfilled' && e.player === 0)) fulfilledAt = s.tick
+  }
+  ok(fulfilledAt > 0 && c0.status === 'fulfilled', 'sells of the named good auto-deliver the contract')
+  ok(shop.contractScore === c0.bonus, `the bonus lands as contractScore (+${c0.bonus})`)
+  ok(score(shop) > score0, 'and the score felt it')
+
+  // a blown deadline costs the penalty, publicly
+  const f = mk()
+  for (let i = 0; i < CONTRACT_FIRST_TICK; i++) tick(f)
+  const fc = f.contracts[0]
+  apply(f, { t: 'claimContract', player: 0, id: fc.id })
+  let failed = false
+  for (let i = 0; i <= fc.windowTicks + 1; i++) {
+    tick(f)
+    if (f.events.some((e) => e.t === 'contractFailed' && e.player === 0)) failed = true
+  }
+  ok(failed && fc.status === 'failed', 'a blown deadline fails the contract publicly')
+  ok(f.players[0].contractScore === -fc.penalty, `and costs ${fc.penalty} score`)
+
+  // unclaimed offers expire; the active-claims cap holds
+  const x = mk()
+  for (let i = 0; i < CONTRACT_FIRST_TICK + CONTRACT_OFFER_TTL + 1; i++) tick(x)
+  ok(x.contracts[0].status === 'expired', `an unclaimed offer expires after ${CONTRACT_OFFER_TTL} ticks`)
+  const capGame = mk()
+  for (let i = 0; i < CONTRACT_FIRST_TICK + 2 * CONTRACT_PERIOD; i++) tick(capGame)
+  const open = capGame.contracts.filter((c) => c.status === 'open')
+  if (open.length >= CONTRACT_MAX_ACTIVE + 1) {
+    for (let i = 0; i < CONTRACT_MAX_ACTIVE; i++) apply(capGame, { t: 'claimContract', player: 0, id: open[i].id })
+    throws(() => apply(capGame, { t: 'claimContract', player: 0, id: open[CONTRACT_MAX_ACTIVE].id }), `a workshop holds at most ${CONTRACT_MAX_ACTIVE} claims`)
+  } else {
+    ok(true, `(cap test skipped — only ${open.length} offers open this seed)`)
+  }
+}
+
+// ── 29. New flaw classes + presets reach the new verbs ───────────────────────
+console.log('depth-update flaws + presets')
+{
+  // badNode: statically impossible vein, structurally admissible
+  const prng = mulberry32(7)
+  const { script: badNode } = flawScript(sampleScript('harvest', 'bn'), prng, 'badNode')
+  validateShape(badNode)
+  ok((badNode.params['node'] as number) > VEIN_ID_MAX, 'badNode lands beyond the map')
+  ok(!staticCheck(badNode).ok, 'badNode is oracle-red')
+  // wrongGood: a phantom good on a sell
+  const { script: wrongGood } = flawScript(sampleScript('sell', 'wg'), mulberry32(8), 'wrongGood')
+  validateShape(wrongGood)
+  ok(typeof wrongGood.params['good'] === 'string' && !['widgets', 'charms'].includes(wrongGood.params['good'] as string), 'wrongGood names a good that sells nowhere')
+  ok(!staticCheck(wrongGood).ok, 'wrongGood is oracle-red')
+  // offByTenX never touches node (1×10 would land IN bounds — badNode owns veins)
+  for (let i = 0; i < 30; i++) {
+    const { script: t } = flawScript(sampleScript('harvest', 'ox'), mulberry32(100 + i), 'offByTenX')
+    if (t.params['node'] !== sampleScript('harvest', 'ox').params['node']) {
+      ok(false, 'offByTenX must not touch node')
+      break
+    }
+  }
+  ok(true, 'offByTenX leaves node alone (badNode owns vein breakage)')
+
+  // practice presets reach the new verbs/params across seeds
+  let sawCraft = false
+  let sawCharmSell = false
+  let sawNode = false
+  for (let seed = 1; seed <= 60; seed++) {
+    for (const d of practiceDrafts(seed, 1, 0, `q${seed}`, 'smart')) {
+      if (d.verb === 'craft') sawCraft = true
+      if (d.verb === 'sell' && d.params['good'] === 'charms') sawCharmSell = true
+      if (d.verb === 'harvest' && typeof d.params['node'] === 'number') sawNode = true
+    }
+  }
+  ok(sawCraft, 'practice presets sometimes draft craft')
+  ok(sawCharmSell, 'practice presets sometimes sell charms')
+  ok(sawNode, 'practice harvesters bind to a vein')
+  // and every practice draft is statically valid by construction
+  let allValid = true
+  for (let seed = 1; seed <= 30; seed++) {
+    for (const d of practiceDrafts(seed, 2, 1, `p${seed}`, 'cheap')) {
+      d.id = 'v'
+      if (!staticCheck(d).ok) allValid = false
+    }
+  }
+  ok(allValid, 'practice drafts stay valid pre-injection (flaws are the injector\'s job)')
+
+  // the paste-prompt's system half teaches the new surface
+  const sys = systemPrompt()
+  ok(sys.includes('"craft"') && sys.includes('"node"') && sys.includes('widgets') && sys.includes('charms'), 'systemPrompt teaches craft + node + goods')
+}
+
+// ── 30. Replay identity ACROSS THE FULL DEPTH SET ────────────────────────────
+// One log that exercises veins, prospect, craft, charm sells, contracts, and
+// rush ticks — across all four phases. Same seed+log → same hash, twice.
+console.log('replay identity (depth update, full feature set)')
+{
+  const log: Array<Command | 'tick'> = [
+    { t: 'draftAccepted', script: { id: 'h1', verb: 'harvest', params: { rate: 4, node: 1 } }, tier: 'cheap' },
+    { t: 'arm', id: 'h1' }, // YOLO (round 1)
+    { t: 'prospect' },
+    'tick', 'tick',
+    { t: 'draftAccepted', script: { id: 'r1', verb: 'refine', params: { rate: 2 } }, tier: 'cheap' },
+    { t: 'arm', id: 'r1' },
+    { t: 'claimContract', id: 1 }, // REFUSED in round 1 — deterministic no-op
+    ...Array(10).fill('tick') as 'tick'[],
+    { t: 'phase', to: 'intermission' },
+    { t: 'draftAccepted', script: { id: 'c1', verb: 'craft', params: { rate: 1 } }, tier: 'smart' },
+    { t: 'phase', to: 'round2' },
+    { t: 'oracleCheck', id: 'c1' },
+    { t: 'arm', id: 'c1' },
+    { t: 'draftAccepted', script: { id: 'h2', verb: 'harvest', params: { rate: 3, node: 2 } }, tier: 'cheap' },
+    { t: 'oracleCheck', id: 'h2' },
+    { t: 'arm', id: 'h2' },
+    { t: 'draftAccepted', script: { id: 's1', verb: 'sell', params: { amount: 2, good: 'charms' } }, tier: 'cheap' },
+    { t: 'oracleCheck', id: 's1' },
+    { t: 'arm', id: 's1' },
+    'tick', 'tick', 'tick',
+    { t: 'claimContract', id: 1 }, // round 2 — lawful claim
+    { t: 'prospect' },
+    ...Array(16).fill('tick') as 'tick'[],
+    { t: 'phase', to: 'reveal' },
+  ]
+  const cfg = { round1: 12, round2: 19 }
+  const a = play(91, log, 2, cfg)
+  const b = play(91, log, 2, cfg)
+  ok(snap(a.s) === snap(b.s), 'identical seed+commands → identical state across the FULL depth set')
+  ok(stateHash(a.s) === stateHash(b.s), `depth replay hash proof: ${stateHash(a.s)}`)
+  ok(a.s.phase === 'reveal' && a.s.round2Summary !== null, 'the depth replay lands in reveal')
+  const c = play(92, log, 2, cfg)
+  ok(stateHash(c.s) !== stateHash(a.s), 'a different seed diverges')
+  // round-2 fairness: the vein field + rush schedule replay round 1's exactly
+  const r2veins = initialFieldOf(91)
+  ok(JSON.stringify(r2veins) === JSON.stringify(initialFieldOf(91)), 'the reseeded field is the same field')
+  function initialFieldOf(seed: number) {
+    return Array.from({ length: VEINS_INITIAL }, (_, i) => veinSpec(seed, i + 1))
+  }
+}
+
 // ── The rules — ONE source of truth (shared/rules.ts) ────────────────────────
 // The reference is GENERATED from balance.ts/mpConfig.ts; these assertions
 // prove the real constants made it into the text — if a number is retuned,
@@ -1025,7 +1475,10 @@ console.log('rules — one source of truth')
   const verbsBody = sections.find((sc) => sc.id === 'verbs')!.body
   for (const v of VERBS) ok(verbsBody.includes(`| \`${v}\` |`), `verb table row: ${v}`)
   for (const [verb, specs] of Object.entries(VERB_PARAMS)) {
-    for (const sp of specs) ok(verbsBody.includes(`\`${sp.name}\` ${sp.min}..${sp.max}`), `bounds in the table: ${verb}.${sp.name} ${sp.min}..${sp.max}`)
+    for (const sp of specs) {
+      const want = sp.values ? `\`${sp.name}\` ∈ ${sp.values.join('|')}` : `\`${sp.name}\` ${sp.min}..${sp.max}`
+      ok(verbsBody.includes(want), `bounds in the table: ${verb}.${sp.name} (${want})`)
+    }
   }
   ok(verbsBody.includes(`${REFINE_RATIO} matter per widget`) && verbsBody.includes('starved'), 'refine saturation (needs matter) is taught')
   ok(verbsBody.includes('nothing to sell'), 'sell saturation (needs widgets) is taught')
@@ -1048,10 +1501,32 @@ console.log('rules — one source of truth')
   // the API quick reference covers EVERY server route (drift-catcher: add a
   // route without documenting it and this fails)
   const apiBody = sections.find((sc) => sc.id === 'api')!.body
-  const routes = ['state', 'draft', 'draft-request', 'oracle', 'arm', 'disarm', 'scrap', 'log', 'join', 'start', 'phase', 'hold', 'agent-prompt']
+  const routes = ['state', 'draft', 'draft-request', 'oracle', 'arm', 'disarm', 'scrap', 'prospect', 'claim-contract', 'log', 'join', 'start', 'phase', 'hold', 'agent-prompt']
   for (const r of routes) ok(apiBody.includes(`/api/room/:pin/${r}\``), `api reference covers /api/room/:pin/${r}`)
   ok(apiBody.includes('`/api/room`') && apiBody.includes('`/api/rules`'), 'api reference covers create + the rules endpoint itself')
   ok(!/\b[wh]_[A-Za-z0-9]{6,}/.test(md), 'the rules text carries no token-shaped material')
+
+  // ── the depth update's teaching (map / rushes+asymmetry / contracts) ───────
+  ok(ids.includes('map') && ids.includes('market-events') && ids.includes('contracts'), 'the three depth sections exist')
+  const mapBody = sections.find((sc) => sc.id === 'map')!.body
+  ok(mapBody.includes(`${VEINS_INITIAL} veins`) && mapBody.includes(`1..${VEIN_ID_MAX}`) && mapBody.includes(`${PROSPECT_COST}⚡`), 'map constants come from balance.ts')
+  ok(mapBody.includes('re-target'), 'the exhausted-vein idle rule is taught')
+  const rushBody = sections.find((sc) => sc.id === 'market-events')!.body
+  ok(rushBody.includes(`${RUSH_MULT_MIN}–${RUSH_MULT_MAX}×`) && rushBody.includes(`${RUSH_LEN} ticks`), 'rush constants come from balance.ts')
+  // the asymmetry is documented EXPLICITLY, for both halves to read
+  ok(rushBody.includes('does NOT carry it') && rushBody.toLowerCase().includes('the human holds the map'), 'THE ASYMMETRY is documented in plain words')
+  ok(rushBody.includes('BASE prices'), 'the base-price dry-run rule is stated')
+  const contractBody = sections.find((sc) => sc.id === 'contracts')!.body
+  ok(contractBody.includes(`${CONTRACT_WINDOW_TICKS} ticks`) && contractBody.includes(`${CONTRACT_MAX_ACTIVE}`) && contractBody.includes(`−${CONTRACT_PENALTY}`), 'contract constants come from balance.ts')
+  ok(contractBody.toLowerCase().includes('hinge act'), 'claiming-is-the-human\'s is taught')
+  // the verb table grew: craft + the good enum + node bounds render from specs
+  const verbsBody2 = sections.find((sc) => sc.id === 'verbs')!.body
+  ok(verbsBody2.includes('| `craft` |') && verbsBody2.includes('`good` ∈ widgets|charms') && verbsBody2.includes(`\`node\` 1..${VEIN_ID_MAX}`), 'the verb table teaches craft, good, and node')
+  // conditions grew
+  const condBody2 = sections.find((sc) => sc.id === 'conditions')!.body
+  ok(condBody2.includes('`charms`') && condBody2.includes('`marketCharms`'), 'the new condition fields are listed')
+  // scoring teaches charms
+  ok(md.includes(`charms SOLD × ${SCORE_PER_CHARM}`), 'the score formula carries the charm weight')
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

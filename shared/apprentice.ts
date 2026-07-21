@@ -27,9 +27,10 @@ import { CONDITION_FIELDS, CONDITION_OPS, VERBS, type DraftTier, type Script } f
 // ── The system prompt: teach the DSL, demand strict JSON ─────────────────────
 
 const VERB_BLURB: Record<string, string> = {
-  harvest: 'gains `rate` matter per tick',
+  harvest: 'gains `rate` matter per tick from vein `node` (veins are finite — they run dry)',
   refine: `converts ${REFINE_RATIO} matter into 1 widget, up to \`rate\` widgets per tick`,
-  sell: 'sells up to `amount` widgets per tick at the market rate (pays tokens)',
+  craft: 'converts matter + widgets into charms (the higher-value good), up to `rate` per tick',
+  sell: 'sells up to `amount` of `good` (widgets|charms, default widgets) per tick at that market rate (pays tokens)',
   patch: 'soaks `strength` gremlin damage per tick (defense)',
   boost: 'multiplies your other scripts\' output ×`mult` — small blowup risk per tick',
 }
@@ -38,7 +39,9 @@ const VERB_BLURB: Record<string, string> = {
  * drift from the rules the oracle enforces. */
 export function systemPrompt(): string {
   const verbLines = VERBS.map((v) => {
-    const specs = VERB_PARAMS[v].map((sp) => `"${sp.name}": integer ${sp.min}..${sp.max}`).join(', ')
+    const specs = VERB_PARAMS[v]
+      .map((sp) => (sp.values ? `"${sp.name}": one of ${sp.values.map((x) => `"${x}"`).join('|')}${sp.optional ? ' (optional)' : ''}` : `"${sp.name}": integer ${sp.min}..${sp.max}`))
+      .join(', ')
     return `- "${v}" (params: { ${specs} }) — ${VERB_BLURB[v]}`
   }).join('\n')
   return [
@@ -47,7 +50,7 @@ export function systemPrompt(): string {
     'Verbs (use EXACTLY these param names and integer bounds):',
     verbLines,
     `Optional "when" gate: {"field": one of ${CONDITION_FIELDS.join('|')}, "op": one of ${CONDITION_OPS.join(' ')}, "value": integer} — the script runs only while the condition is true.`,
-    'Economy: harvest matter → refine widgets → sell at the market rate. Patch when the gremlin pressure climbs. Boost only when other scripts are running.',
+    'Economy: harvest matter from map veins → refine widgets → craft charms → sell at each market rate. Patch when the gremlin pressure climbs. Boost only when other scripts are running.',
     'Reply with a STRICT JSON array of 2 or 3 scripts and NOTHING else — no prose, no markdown fences, no "id" field.',
   ].join('\n')
 }
@@ -58,11 +61,13 @@ export interface SeatBrief {
   phase: string
   tick: number
   market: number
+  marketCharms: number
   gremlin: number
   tokens: number
   matter: number
   widgets: number
-  hand: Array<{ verb: string; params: Record<string, number>; when?: unknown; status: string; armed: boolean }>
+  charms: number
+  hand: Array<{ verb: string; params: Record<string, number | string>; when?: unknown; status: string; armed: boolean }>
 }
 
 export function userPrompt(brief: SeatBrief, order?: string): string {
@@ -130,13 +135,19 @@ function sanitizeDraft(c: unknown): Script | null {
   const o = c as Record<string, unknown>
   const verb = typeof o.verb === 'string' ? o.verb.trim().slice(0, 24) : ''
   if (!verb) return null
-  const params: Record<string, number> = {}
+  const params: Record<string, number | string> = {}
   if (typeof o.params === 'object' && o.params !== null && !Array.isArray(o.params)) {
     let kept = 0
     for (const [k, v] of Object.entries(o.params as Record<string, unknown>)) {
-      const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
-      if (Number.isFinite(n) && k.length >= 1 && k.length <= 24 && kept < 8) {
+      if (k.length < 1 || k.length > 24 || kept >= 8) continue
+      const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : NaN
+      if (Number.isFinite(n)) {
         params[k] = n
+        kept++
+      } else if (typeof v === 'string' && v.trim().length >= 1) {
+        // enum-shaped params (sell's `good`) stay strings — a WRONG string is
+        // preserved on purpose (the oracle's catch, the game's comedy)
+        params[k] = v.trim().slice(0, 16)
         kept++
       }
     }
@@ -204,9 +215,21 @@ export function practiceDrafts(seed: number, tick: number, seat: number, reqId: 
     const verb = VERBS[Math.floor(prng() * VERBS.length) % VERBS.length]
     const s = sampleScript(verb, 'tmp')
     for (const sp of VERB_PARAMS[verb] ?? []) {
-      const span = sp.max - sp.min
+      if (sp.values) {
+        // sell sometimes chases the deeper pipeline (charms)
+        s.params[sp.name] = prng() < 0.4 ? sp.values[sp.values.length - 1] : sp.values[0]
+        continue
+      }
+      if (sp.name === 'node') {
+        // harvesters bind to a plausible early vein (1..4 — the opening field
+        // plus the first spawn); re-targeting is the players' craft
+        s.params[sp.name] = 1 + (Math.floor(prng() * 4) % 4)
+        continue
+      }
+      const min = sp.min ?? 1
+      const span = (sp.max ?? min) - min
       const roll = tier === 'smart' ? 0.5 + prng() * 0.5 : prng() // smart leans stronger
-      s.params[sp.name] = sp.min + Math.round(span * roll)
+      s.params[sp.name] = min + Math.round(span * roll)
     }
     if (prng() < 0.35) {
       const conds: NonNullable<Script['when']>[] = [
@@ -214,6 +237,7 @@ export function practiceDrafts(seed: number, tick: number, seat: number, reqId: 
         { field: 'matter', op: '>', value: 6 },
         { field: 'gremlin', op: '<', value: 5 },
         { field: 'widgets', op: '>', value: 2 },
+        { field: 'charms', op: '>', value: 0 },
       ]
       s.when = conds[Math.floor(prng() * conds.length) % conds.length]
     }

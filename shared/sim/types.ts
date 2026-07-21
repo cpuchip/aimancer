@@ -2,18 +2,24 @@
 // Architecture adapted from kernel-panic shared/sim/types.ts (newGame/apply/
 // tick over a pure state), reshaped for workshops instead of towers.
 
-// ── Script DSL v1 (bounded, 5 verbs) ─────────────────────────────────────────
+// ── Script DSL v2 (bounded, 6 verbs — craft joined in the depth update) ──────
 
-export type Verb = 'harvest' | 'refine' | 'sell' | 'patch' | 'boost'
-export const VERBS: readonly Verb[] = ['harvest', 'refine', 'sell', 'patch', 'boost'] as const
+export type Verb = 'harvest' | 'refine' | 'craft' | 'sell' | 'patch' | 'boost'
+export const VERBS: readonly Verb[] = ['harvest', 'refine', 'craft', 'sell', 'patch', 'boost'] as const
 
-export type ConditionField = 'tokens' | 'matter' | 'widgets' | 'gremlin' | 'market' | 'tick'
+/** The sellable goods — widgets (the classic) and charms (the deeper pipeline). */
+export type Good = 'widgets' | 'charms'
+export const GOODS: readonly Good[] = ['widgets', 'charms'] as const
+
+export type ConditionField = 'tokens' | 'matter' | 'widgets' | 'charms' | 'gremlin' | 'market' | 'marketCharms' | 'tick'
 export const CONDITION_FIELDS: readonly ConditionField[] = [
   'tokens',
   'matter',
   'widgets',
+  'charms',
   'gremlin',
   'market',
+  'marketCharms',
   'tick',
 ] as const
 
@@ -34,11 +40,13 @@ export interface Condition {
  * JSON-shaped. `verb` and `params` are deliberately loose: structural typing
  * happens at the command boundary; SEMANTIC validation (unknown verb, wrong
  * param name, out-of-bounds value, impossible condition) is the oracle's job.
- * The valid verb set is VERBS. */
+ * The valid verb set is VERBS. Param values are integers — except declared
+ * enum params (sell's `good`), which are short strings; a hallucinated string
+ * anywhere else is representable and oracle-red. */
 export interface Script {
   id: string
   verb: string
-  params: Record<string, number>
+  params: Record<string, number | string>
   when?: Condition
 }
 
@@ -70,6 +78,8 @@ export interface ScriptRun {
   dTokens: number
   dMatter: number
   dWidgets: number
+  /** Charms moved this tick (craft/sell charms). Absent on pre-charm replays. */
+  dCharms?: number
 }
 
 export interface ScriptSlot {
@@ -113,6 +123,7 @@ export interface PlayerRoundStats {
   name: string
   score: number
   widgetsSold: number
+  charmsSold: number
   disasters: number // misfires + blowups + corruptions
   waste: number
   uptime: number
@@ -163,6 +174,10 @@ export interface Workshop {
   matter: number
   widgets: number // inventory (sellable)
   widgetsSold: number // cumulative SOLD — the scored count (shipping IS selling)
+  charms: number // inventory — the deeper pipeline's good
+  charmsSold: number // cumulative SOLD charms (scored higher than widgets)
+  contractScore: number // net contract bonuses − penalties (scored directly)
+  prospects: number[] // vein ids this seat has paid to preview (own-seat info)
   disasters: number // cumulative misfires + blowups + corruptions (summary stat)
   uptime: number // armed-valid script-ticks (scored)
   waste: number // blowups + gremlin damage + dead scripts (scored against)
@@ -170,13 +185,52 @@ export interface Workshop {
   pending: PendingDraft[] // apprentice requests awaiting drafts (paid, in escrow)
 }
 
+// ── The map: matter veins (finite, seeded, they surface and run dry) ─────────
+
+/** A LIVE vein on the shared map. Spec fields (x/y/rate/reserveMax/spawnedAt)
+ * are pure functions of (seed, id) — see world.veinSpec; only `reserve` is
+ * state, drained by harvesters. reserve === 0 means exhausted (visibly). */
+export interface VeinState {
+  id: number // 1..VEIN_ID_MAX — harvest binds by this number (params.node)
+  x: number // map layout, 0..100 (seeded per room)
+  y: number // map layout, 0..62 (seeded per room)
+  rate: number // richness — the vein's flow cap per harvester per tick
+  reserve: number // finite matter remaining
+  reserveMax: number
+  spawnedAt: number // tick it surfaced (0 = the opening field)
+}
+
+// ── Contracts (round 2 only — seeded offers; the HUMAN claims on the phone) ──
+
+export type ContractStatus = 'open' | 'claimed' | 'fulfilled' | 'failed' | 'expired'
+
+/** A materialized contract. Spec fields come from world.contractSpec (pure
+ * f(seed, id)); status/player/deadline/progress are state. Fulfillment is
+ * auto-detected from sells of the named good after the claim. */
+export interface ContractState {
+  id: number
+  good: Good
+  qty: number
+  windowTicks: number // ticks allowed after the claim
+  bonus: number // SCORE paid on delivery (score, not tokens — the cap can't waste it)
+  penalty: number // SCORE lost on a blown deadline
+  offeredAt: number
+  status: ContractStatus
+  player: number | null // who claimed it
+  deadline: number | null // claim tick + windowTicks
+  progress: number // goods sold toward qty since the claim
+}
+
 export interface SimState {
   seed: number
   tick: number
   phase: SimPhase
   phaseTicks: PhaseTicks // per-round tick budgets (0 = unlimited)
-  market: number // tokens per widget, drifts on the seeded schedule
+  market: number // BASE tokens per widget, drifts on the seeded schedule
+  marketCharms: number // BASE tokens per charm — its own seeded drift
   gremlin: number // current pressure on the shared threat track
+  veins: VeinState[] // the map's matter veins (spawn on the seeded schedule)
+  contracts: ContractState[] // materialized offers + claims (round 2 only)
   players: Workshop[]
   events: SimEvent[] // this tick's public happenings (cleared each tick)
   eventSeq: number // total events EVER emitted — the feed's dedup watermark
@@ -198,7 +252,16 @@ export type SimEvent =
   | { t: 'blowup'; player: number; id: string }
   | { t: 'gremlinSpike'; pressure: number; damage: number[] } // damage per player
   | { t: 'corrupted'; player: number; id: string }
-  | { t: 'marketShift'; market: number }
+  | { t: 'marketShift'; market: number } // BASE widget price stepped
+  | { t: 'charmShift'; market: number } // BASE charm price stepped
+  | { t: 'veinSpawned'; id: number; rate: number; reserve: number } // a new vein surfaced
+  | { t: 'veinExhausted'; id: number } // ran dry — harvesters idle until re-targeted
+  | { t: 'prospected'; player: number } // paid survey — WHAT it revealed stays own-seat
+  | { t: 'contractOffered'; id: number; good: Good; qty: number; bonus: number }
+  | { t: 'contractClaimed'; player: number; id: number }
+  | { t: 'contractFulfilled'; player: number; id: number; bonus: number }
+  | { t: 'contractFailed'; player: number; id: number; penalty: number }
+  | { t: 'contractExpired'; id: number }
   | { t: 'scrapped'; player: number; id: string }
   | { t: 'phase'; phase: SimPhase }
 
@@ -220,4 +283,6 @@ export type Command =
   | { t: 'arm'; player?: number; id: string }
   | { t: 'disarm'; player?: number; id: string }
   | { t: 'scrap'; player?: number; id: string } // free a hand slot
+  | { t: 'prospect'; player?: number } // paid: preview the NEXT unspawned vein (own-seat info)
+  | { t: 'claimContract'; player?: number; id: number } // the HUMAN's strategy act (hinge surface)
   | { t: 'phase'; to: SimPhase } // host act — logged so replays cross phases

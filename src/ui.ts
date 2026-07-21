@@ -10,6 +10,7 @@ import type { OracleReport } from '../shared/sim/oracle.ts'
 const VERB_NOUN: Record<string, string> = {
   harvest: 'Harvester',
   refine: 'Refinery',
+  craft: 'Charmforge',
   sell: 'Vendotron',
   patch: 'Patchbot',
   boost: 'Overclocker',
@@ -18,6 +19,7 @@ const VERB_NOUN: Record<string, string> = {
 export const VERB_ICON: Record<string, string> = {
   harvest: '⛏️',
   refine: '⚙️',
+  craft: '🧿',
   sell: '💰',
   patch: '🛡️',
   boost: '🚀',
@@ -56,8 +58,11 @@ export function describeParams(script: Script): string[] {
   const lines: string[] = []
   for (const [k, v] of Object.entries(script.params)) {
     if (script.verb === 'harvest' && k === 'rate') lines.push(`gathers ${v} matter each tick`)
+    else if (script.verb === 'harvest' && k === 'node') lines.push(`bound to vein #${v}`)
     else if (script.verb === 'refine' && k === 'rate') lines.push(`crafts up to ${v} widget${v === 1 ? '' : 's'} each tick (3 matter each)`)
-    else if (script.verb === 'sell' && k === 'amount') lines.push(`sells up to ${v} widget${v === 1 ? '' : 's'} each tick at market price`)
+    else if (script.verb === 'craft' && k === 'rate') lines.push(`forges up to ${v} charm${v === 1 ? '' : 's'} each tick (2 matter + 1 widget each)`)
+    else if (script.verb === 'sell' && k === 'amount') lines.push(`sells up to ${v} each tick at market price`)
+    else if (script.verb === 'sell' && k === 'good') lines.push(`sells ${v}`)
     else if (script.verb === 'patch' && k === 'strength') lines.push(`soaks ${v} gremlin damage each tick`)
     else if (script.verb === 'boost' && k === 'mult') lines.push(`multiplies your other scripts ×${v} — risky`)
     else lines.push(`${k}: ${v}`)
@@ -79,13 +84,14 @@ export function predictionSummary(report: OracleReport): string | null {
   const ran = pr.filter((p) => p.ran).length
   if (ran === 0) return `next ${pr.length} ticks: idle (condition holds it back)`
   const sum = pr.reduce(
-    (a, p) => ({ tokens: a.tokens + p.tokens, matter: a.matter + p.matter, widgets: a.widgets + p.widgets }),
-    { tokens: 0, matter: 0, widgets: 0 },
+    (a, p) => ({ tokens: a.tokens + p.tokens, matter: a.matter + p.matter, widgets: a.widgets + p.widgets, charms: a.charms + (p.charms ?? 0) }),
+    { tokens: 0, matter: 0, widgets: 0, charms: 0 },
   )
   const parts: string[] = []
   const fmt = (n: number, icon: string) => `${n > 0 ? '+' : ''}${n}${icon}`
   if (sum.matter !== 0) parts.push(fmt(sum.matter, '⛏'))
   if (sum.widgets !== 0) parts.push(fmt(sum.widgets, '⚙'))
+  if (sum.charms !== 0) parts.push(fmt(sum.charms, '🧿'))
   if (sum.tokens !== 0) parts.push(fmt(sum.tokens, '⚡'))
   if (parts.length === 0) parts.push('no yield')
   return `next ${pr.length} ticks: ${parts.join(' ')}`

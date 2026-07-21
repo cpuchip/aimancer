@@ -41,6 +41,27 @@ The build week (from the design doc, D1 = 2026-07-21):
       (0.144.6, native sandbox) each HTTP-joined a seat, curled the API
       unaided, and landed 2 drafts on the wire (log: seat 2 tick 2, seat 1
       tick 7).** Gates: smoke 196 · wstest 149.
+- [x] **D5a — THE DEPTH UPDATE** (live-playtest verdict: "there isn't much
+      going on once I draft"): the world MOVES now. (1) **The workshop map** —
+      seeded matter veins (3 initial, spawns every ~5 ticks, ids 1..12) with
+      richness `rate` + FINITE reserve; `harvest` requires `node` (vein
+      binding); exhausted veins idle harvesters with a `re-target` lastRun
+      (never kill); `prospect` (2⚡, either surface) previews the next vein
+      into own-seat state. Board renders the map as the RTS centerpiece
+      (zones, drain bars, spawn pings, shuttling workers per armed harvester,
+      nest flare); phone gets the compact vein list. (2) **A living market** —
+      second good CHARMS (`craft`: 2 matter + 1 widget → 1 charm; sells at its
+      own drifting rate; scores 25 vs widget 10), `sell` takes optional
+      `good` enum; **RUSH windows** (seeded, ×2-3 for 3 ticks) announced on
+      the BOARD+phone ONLY — **the agent's HTTP /state never carries the rush
+      banner/forecast, and the oracle dry-run quotes BASE prices** (CORE
+      IDENTITY #2 mechanized + documented in rules + paste-prompt).
+      (3) **Contracts** (round 2 only): seeded offers, HINGE-only claim (403
+      for workers), auto-delivery from sells, bonus/penalty land as SCORE.
+      Flaw classes +badNode/+wrongGood; presets reach craft/charms/nodes;
+      wiki/rules regenerated (3 new sections incl. the asymmetry, spelled
+      out); replay identity proven across the full depth set. Gates:
+      smoke 385 · wstest 211.
 - [ ] **D5** — presentation weave (round switcher, delta board, replay
       theater) + assets + polish.
 - [ ] **D6** — family+Dave playtest → fix → dress rehearsal. **★ HOTFIX 1

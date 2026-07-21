@@ -27,10 +27,11 @@ import {
   seedFromCode,
 } from '../shared/mpConfig.ts'
 import { fallbackDraft, injectApprenticeFlaws, practiceDrafts, type SeatBrief } from '../shared/apprentice.ts'
-import type { ClientMessage, LobbyPlayer, PlayerView, RoomLogView, RoomView, ServerMessage } from '../shared/protocol.ts'
+import type { ClientMessage, ContractView, LobbyPlayer, PlayerView, ProspectView, RoomLogView, RoomView, RushView, ServerMessage } from '../shared/protocol.ts'
 import { apprenticeConfig, apprenticeMode, fetchDrafts } from './apprentice.ts'
 import { oracle } from '../shared/sim/oracle.ts'
 import { apply, computeDelta, newGame, RuleError, score, tick, ticksRemaining, ticksRunning } from '../shared/sim/sim.ts'
+import { effectivePrice, nextRushInTicks, rushAt, veinSpec } from '../shared/sim/world.ts'
 import { PHASE_NEXT } from '../shared/sim/types.ts'
 import type { Command, DraftTier, Script, SimPhase, SimState } from '../shared/sim/types.ts'
 
@@ -206,6 +207,24 @@ export class Room {
         if (!r.ok) send(ws, { type: 'error', message: r.error })
         return
       }
+      case 'prospect': {
+        // the paid vein preview — info play, safe from either surface (the
+        // result lands in OWN-seat state; the agent reads it after the buy)
+        const who = this.auth(msg.token)
+        if (!who) return send(ws, { type: 'error', message: 'bad token' })
+        const r = this.command({ t: 'prospect', player: who.seat })
+        if (!r.ok) send(ws, { type: 'error', message: r.error })
+        return
+      }
+      case 'claimContract': {
+        // strategy is the HUMAN's: claiming a contract is a hinge act, like arm
+        const who = this.auth(msg.token)
+        if (!who) return send(ws, { type: 'error', message: 'bad token' })
+        if (who.role !== 'hinge') return send(ws, { type: 'error', message: 'Claiming a contract is the human\'s call — use the hinge token.' })
+        const r = this.command({ t: 'claimContract', player: who.seat, id: msg.id })
+        if (!r.ok) send(ws, { type: 'error', message: r.error })
+        return
+      }
       case 'ping': return send(ws, { type: 'pong' })
     }
   }
@@ -352,18 +371,21 @@ export class Room {
     return { ok: true, reqId }
   }
 
-  /** What the apprentice may know: its OWN workshop + the public world. */
+  /** What the apprentice may know: its OWN workshop + the public world —
+   * effective prices only (the narrow view; no rush flag, like /state). */
   private seatBrief(seat: number): SeatBrief {
     const sim = this.sim!
     const w = sim.players[seat]
     return {
       phase: sim.phase,
       tick: sim.tick,
-      market: sim.market,
+      market: effectivePrice(sim.seed, sim.tick, sim.market, 'widgets'),
+      marketCharms: effectivePrice(sim.seed, sim.tick, sim.marketCharms, 'charms'),
       gremlin: sim.gremlin,
       tokens: w.tokens,
       matter: w.matter,
       widgets: w.widgets,
+      charms: w.charms,
       hand: w.scripts.map((sl) => ({
         verb: sl.script.verb,
         params: sl.script.params,
@@ -456,8 +478,15 @@ export class Room {
   }
 
   /** REDACTION lives here: everyone sees resources/scores/script fates; only
-   * your own seat sees script BODIES; auth tokens appear in no view ever. */
-  viewFor(seatIndex: number | null): RoomView {
+   * your own seat sees script BODIES; auth tokens appear in no view ever.
+   * An ARMED script additionally shows its verb + vein binding (a deployed
+   * unit stands on the map); un-armed drafts stay body-secret.
+   *
+   * `rich` = a HUMAN surface (ws: board watchers + phones). The agent's HTTP
+   * /state passes rich=false and NEVER carries the rush banner or forecast —
+   * CORE IDENTITY #2: the human holds the map, structurally. Prices in every
+   * view are the CURRENT effective numbers only. */
+  viewFor(seatIndex: number | null, rich = true): RoomView {
     const sim = this.sim
     const now = Date.now()
     const players: PlayerView[] = sim
@@ -471,6 +500,9 @@ export class Room {
           matter: w.matter,
           widgets: w.widgets,
           widgetsSold: w.widgetsSold,
+          charms: w.charms,
+          charmsSold: w.charmsSold,
+          contractScore: w.contractScore,
           disasters: w.disasters,
           uptime: w.uptime,
           waste: w.waste,
@@ -480,9 +512,39 @@ export class Room {
             armed: sl.armed,
             yolo: sl.yolo,
             verdictOk: sl.lastVerdict ? sl.lastVerdict.ok : null,
+            verb: sl.armed ? sl.script.verb : null,
+            node: sl.armed && sl.script.verb === 'harvest' && typeof sl.script.params['node'] === 'number' ? (sl.script.params['node'] as number) : null,
           })),
         }))
       : []
+    const contracts: ContractView[] = sim
+      ? sim.contracts.map((c) => ({
+          id: c.id,
+          good: c.good,
+          qty: c.qty,
+          windowTicks: c.windowTicks,
+          bonus: c.bonus,
+          penalty: c.penalty,
+          status: c.status,
+          player: c.player,
+          deadline: c.deadline,
+          progress: c.progress,
+        }))
+      : []
+    const rushNow = sim ? rushAt(sim.seed, sim.tick) : null
+    const richFields: Partial<RoomView> = rich
+      ? {
+          rush: rushNow && sim ? ({ good: rushNow.good, mult: rushNow.mult, ticksLeft: rushNow.endTick - sim.tick + 1 } satisfies RushView) : null,
+          nextRushInTicks: sim ? nextRushInTicks(sim.tick) : 0,
+        }
+      : {}
+    const prospects: ProspectView[] =
+      seatIndex !== null && sim && sim.players[seatIndex]
+        ? sim.players[seatIndex].prospects.map((k) => {
+            const sp = veinSpec(sim.seed, k)
+            return { id: sp.id, spawnsInTicks: Math.max(0, sp.spawnTick - sim.tick), x: sp.x, y: sp.y, rate: sp.rate, reserveMax: sp.reserveMax }
+          })
+        : []
     return {
       room: this.code,
       started: this.started,
@@ -496,8 +558,12 @@ export class Room {
       // ms until the next world tick fires (null when the world holds still) —
       // the client's wall-clock countdown anchors on this
       nextTickInMs: this.started && sim && ticksRunning(sim) ? Math.max(0, this.lastTickAt + this.tickMs - now) : null,
-      market: sim?.market ?? 0,
+      market: sim ? effectivePrice(sim.seed, sim.tick, sim.market, 'widgets') : 0,
+      marketCharms: sim ? effectivePrice(sim.seed, sim.tick, sim.marketCharms, 'charms') : 0,
       gremlin: sim?.gremlin ?? 0,
+      veins: sim?.veins ?? [],
+      contracts,
+      ...richFields,
       events: sim?.events ?? [],
       eventSeq: sim?.eventSeq ?? 0,
       players,
@@ -507,7 +573,7 @@ export class Room {
       apprentice: apprenticeMode(),
       you:
         seatIndex !== null && sim && sim.players[seatIndex]
-          ? { index: seatIndex, hand: sim.players[seatIndex].scripts, pending: sim.players[seatIndex].pending }
+          ? { index: seatIndex, hand: sim.players[seatIndex].scripts, pending: sim.players[seatIndex].pending, prospects }
           : null,
     }
   }

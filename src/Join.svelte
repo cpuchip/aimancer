@@ -11,6 +11,7 @@
     DRAFT_COST_CHEAP,
     DRAFT_COST_SMART,
     ORACLE_COST,
+    PROSPECT_COST,
     TOKEN_REGEN,
   } from '../shared/sim/balance.ts'
   import { describeEvent, freshEvents, newFeedCursor } from '../shared/eventFeed.ts'
@@ -213,9 +214,10 @@
     <summary>📖 How to play (30 seconds)</summary>
     <ol>
       <li><b>You + your AI are ONE player.</b> It drafts scripts — only YOU can arm them.</li>
-      <li><b>Get scripts:</b> connect your agent (copy the prompt below), ask the apprentice, or write your own.</li>
-      <li><b>ARM a script</b> and it runs every tick: harvest matter → refine → SELL widgets = score.</li>
-      <li><b>Round 1: no oracle exists.</b> Arm and pray. <b>Round 2:</b> pay to VERIFY before arming — green scripts auto-renew every tick, while YOLO'd scripts draw extra gremlin damage.</li>
+      <li><b>Get scripts</b> (connect your agent / ask the apprentice / write your own), then <b>ARM</b> them: harvest a map vein → refine → craft charms → SELL = score.</li>
+      <li><b>Veins run DRY</b> — watch the map, re-target harvesters, prospect the next vein early.</li>
+      <li><b>YOU see what your AI can't:</b> market RUSH windows (2-3×!) show on the board only — relay them, and claim contracts here (round 2).</li>
+      <li><b>Round 1: no oracle exists.</b> Arm and pray. <b>Round 2:</b> pay to VERIFY — green scripts auto-renew; YOLO'd ones draw gremlin damage.</li>
       <li><b>Watch your ⚡</b> (regen each tick) and the gremlin — patch when pressure climbs.</li>
     </ol>
     <p class="faint">The bet: cheap drafts are fast, often wrong (~{APPRENTICE_FLAW_CHEAP_PCT}%); smart is pricier, usually right (~{APPRENTICE_FLAW_SMART_PCT}% flawed). Cheap+verify vs smart+trust — that's the round-2 lesson.</p>
@@ -315,7 +317,17 @@
         <span class="stat"><img class="ricon" src="/assets/res_tokens.png" alt="tokens" /> <b class="num">{myShop.tokens}</b> +{TOKEN_REGEN}/tick</span>
         <span class="stat"><img class="ricon" src="/assets/res_matter.png" alt="matter" /> <b class="num">{myShop.matter}</b></span>
         <span class="stat"><img class="ricon" src="/assets/res_widgets.png" alt="widgets" /> <b class="num">{myShop.widgets}</b></span>
+        <span class="stat">🧿 <b class="num">{myShop.charms}</b></span>
         <span class="stat">★ <b class="num">{myShop.score}</b></span>
+      </div>
+    {/if}
+
+    {#if view?.rush}
+      <!-- the HUMAN sees the rush; the agent's API doesn't — RELAY IT -->
+      <div class="rush-banner phone rush-{view.rush.good}">
+        <span>{view.rush.good === 'charms' ? '🧿' : '⚙️'}</span>
+        <b>{view.rush.good.toUpperCase()} RUSH ×{view.rush.mult}</b>
+        <span>{view.rush.ticksLeft}t left — tell your agent!</span>
       </div>
     {/if}
 
@@ -366,6 +378,48 @@
         <div class="card">
           <h2 style="margin-top:0">Round 1 — how it went</h2>
           <p class="muted">score {view.round1Summary.players[me?.index ?? 0]?.score ?? 0} · disasters {view.round1Summary.players[me?.index ?? 0]?.disasters ?? 0}. The world is frozen — draft now, arm in round 2.</p>
+        </div>
+      {/if}
+
+      {#if view && view.veins.length > 0}
+        <h2>The map <span class="faint" style="text-transform:none; letter-spacing:normal">(⚙ {view.market}⚡ · 🧿 {view.marketCharms}⚡)</span></h2>
+        <div class="card stack" style="gap:var(--s-2)">
+          {#each view.veins as v (v.id)}
+            <div class="vein-row" class:dry={v.reserve <= 0}>
+              <span class="num" style="min-width:64px">vein #{v.id} · r{v.rate}</span>
+              <div class="vein-bar"><div class="vein-bar-fill" style="width:{Math.round((100 * v.reserve) / Math.max(1, v.reserveMax))}%"></div></div>
+              <span class="num" style="min-width:52px; text-align:right">{v.reserve <= 0 ? 'DRY' : `${v.reserve}/${v.reserveMax}`}</span>
+            </div>
+          {/each}
+          {#each me?.prospects ?? [] as pr (pr.id)}
+            <div class="vein-row" style="color:var(--accent)">
+              <span>🔭 vein #{pr.id} — rate {pr.rate}, {pr.reserveMax} matter, surfaces in ~{pr.spawnsInTicks}t (only you know)</span>
+            </div>
+          {/each}
+          <button class="ghost" disabled={!canAct || phase === 'intermission'} onclick={() => send({ type: 'prospect', token: hingeToken })}>
+            🔭 Prospect the next vein ({PROSPECT_COST}⚡)
+          </button>
+        </div>
+      {/if}
+
+      {#if view && view.contracts.length > 0}
+        <h2>Contracts <span class="faint" style="text-transform:none; letter-spacing:normal">(you claim — sells auto-deliver)</span></h2>
+        <div class="card stack" style="gap:var(--s-2)">
+          {#each view.contracts.filter((c) => c.status === 'open') as c (c.id)}
+            <div class="row" style="justify-content:space-between">
+              <span>📜 deliver <b>{c.qty} {c.good}</b> in {c.windowTicks}t → <b>+{c.bonus}</b></span>
+              <button class="primary" style="min-height:36px" onclick={() => send({ type: 'claimContract', token: hingeToken, id: c.id })}>Claim</button>
+            </div>
+          {/each}
+          {#each view.contracts.filter((c) => c.status === 'claimed' && c.player === me?.index) as c (c.id)}
+            <div class="row" style="justify-content:space-between">
+              <span>📜 #{c.id}: <b>{c.progress}/{c.qty} {c.good}</b> · deliver by t{c.deadline}</span>
+              <span class="chip drafted">yours</span>
+            </div>
+          {/each}
+          {#each view.contracts.filter((c) => c.status === 'claimed' && c.player !== me?.index) as c (c.id)}
+            <div class="faint">📜 #{c.id} claimed by {view.players[c.player ?? 0]?.name} — {c.progress}/{c.qty} {c.good}</div>
+          {/each}
         </div>
       {/if}
 
@@ -477,7 +531,7 @@
 
       <details>
         <summary class="muted">advanced: hand-write a script</summary>
-        <textarea rows="3" placeholder={'{"id":"x1","verb":"harvest","params":{"rate":3}}'} bind:value={customJson}></textarea>
+        <textarea rows="3" placeholder={'{"id":"x1","verb":"harvest","params":{"rate":3,"node":1}}'} bind:value={customJson}></textarea>
         <button onclick={() => draftCustom()} disabled={!customJson || !canAct}>draft custom ({DRAFT_COST_CHEAP}⚡)</button>
       </details>
     {/if}
