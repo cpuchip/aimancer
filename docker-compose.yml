@@ -1,0 +1,22 @@
+# AIMANCER.
+# Deploy: Dokploy builds this compose and routes aimancer.cpuchip.net -> game:8080
+#         via Traefik over the internal network (no host port published — the VPS
+#         runs several apps that all listen on 8080 in-container).
+# Local dev: `npm run dev` + `npm run dev:server`, not this compose.
+# Adapted from kernel-panic's docker-compose.yml (the house pattern).
+
+services:
+  game:
+    build: .
+    container_name: aimancer
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+    expose:
+      - "8080"
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:8080/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

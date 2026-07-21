@@ -1,0 +1,26 @@
+// Multiplayer knobs shared by the server and the client.
+// seedFromCode adapted verbatim from kernel-panic shared/mpConfig.ts;
+// PIN alphabet from chips server/tables.ts.
+
+export const MAX_PLAYERS = 8 // workshop seats per room
+
+/** World tick length (ms). ~25s absorbs LLM latency at show time; a room can
+ * be started with a faster tick for dev (see TICK_MS_MIN/MAX clamps). */
+export const TICK_MS_DEFAULT = 25_000
+export const TICK_MS_MIN = 250 // fast enough for wstest, still a real interval
+export const TICK_MS_MAX = 60_000
+
+/** PIN alphabet — no I/O, read-aloud friendly (chips' CODE_ALPHABET). */
+export const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+export const CODE_LENGTH = 4
+
+/** Deterministic seed from a room code — same room code → same world.
+ * FNV-1a, stolen verbatim from kernel-panic. */
+export function seedFromCode(code: string): number {
+  let h = 2166136261
+  for (let i = 0; i < code.length; i++) {
+    h ^= code.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return (h >>> 0) % 0x7fffffff || 1
+}

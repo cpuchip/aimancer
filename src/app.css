@@ -1,0 +1,117 @@
+/* D1 placeholder styling — ugly is fine, mobile-first, no art. */
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  background: #101418;
+  color: #d8e0e8;
+  font-size: 14px;
+}
+#app {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 12px;
+}
+h1 {
+  font-size: 20px;
+  margin: 8px 0;
+}
+h2 {
+  font-size: 15px;
+  margin: 12px 0 6px;
+}
+button {
+  background: #223042;
+  color: #d8e0e8;
+  border: 1px solid #3a4f68;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 2px;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.4;
+}
+button.arm {
+  background: #4a2a2a;
+  border-color: #7a4040;
+}
+button.oracle {
+  background: #24402c;
+  border-color: #3c6a4a;
+}
+input,
+select,
+textarea {
+  background: #182028;
+  color: #d8e0e8;
+  border: 1px solid #3a4f68;
+  border-radius: 6px;
+  padding: 8px;
+  font-family: inherit;
+  font-size: 14px;
+  width: 100%;
+  margin: 3px 0;
+}
+.card {
+  border: 1px solid #3a4f68;
+  border-radius: 8px;
+  padding: 8px;
+  margin: 8px 0;
+  background: #161c24;
+}
+.card.armed {
+  border-color: #d9a04a;
+}
+.card.dead {
+  border-color: #b04040;
+  opacity: 0.7;
+}
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #0c1014;
+  padding: 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 6px 0;
+}
+.bar span {
+  background: #182430;
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.err {
+  color: #ff9a9a;
+}
+.ok {
+  color: #9aff9a;
+}
+.muted {
+  color: #7a8896;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+td,
+th {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid #223042;
+}
+.events {
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+}
