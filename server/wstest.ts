@@ -661,7 +661,10 @@ async function main(): Promise<void> {
     ok(revealReq.status === 409 && revealReqBody.error.includes('over'), 'draft-request after the reveal → 409 (the game is a museum)')
 
     // ── PRACTICE MODE: a second server with NO model wired ───────────────────
-    practiceServer = spawnGame(PRACTICE_PORT, { APPRENTICE_BASE_URL: '' })
+    // The env value is an UNINTERPOLATED compose literal — the exact string the
+    // first D3 deploy shipped (Dokploy left `${APPRENTICE_BASE_URL:-}` verbatim,
+    // caught live). A non-http "URL" must mean practice, never fake-live.
+    practiceServer = spawnGame(PRACTICE_PORT, { APPRENTICE_BASE_URL: '${APPRENTICE_BASE_URL:-}' })
     await awaitBoot(practiceServer)
     // TestClient is pinned to PORT — drive the practice server raw
     const praWs = new WebSocket(`ws://localhost:${PRACTICE_PORT}/ws`)

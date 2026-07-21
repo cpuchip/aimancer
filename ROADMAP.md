@@ -49,6 +49,13 @@ The build week (from the design doc, D1 = 2026-07-21):
   behind the same async flow (same economy, same seeded flaw rates), so BYO
   agents and the phone behave identically with no model wired. The live
   deploy runs practice mode until APPRENTICE_* env is set (Dokploy).
+- ⚠ **Dokploy does NOT interpolate `${VAR:-}` in compose `environment:`** —
+  the first D3 deploy shipped the literal string, which read as "a model is
+  wired" and every draft request insta-refunded (caught by a live ws probe).
+  Fixed defensively: `apprenticeConfig()` requires a real `http(s)://` URL,
+  else practice mode. **Wiring prod env on Dokploy therefore needs a live
+  check after setting the vars** — if the UI env doesn't reach compose
+  interpolation, hardcode the values in a Dokploy-side override, not in git.
 - **For D4:** README's HTTP API table is current and wstest-proven — build
   the join prompt on it. Room create/join is still ws-only; the join flow
   needs either a `POST /api/room` + `POST /api/room/:pin/join` pair or a

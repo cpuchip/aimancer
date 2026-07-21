@@ -20,10 +20,13 @@ export interface ApprenticeConfig {
   timeoutMs: number
 }
 
-/** Read the env each call (cheap, and tests can vary it). null = practice mode. */
+/** Read the env each call (cheap, and tests can vary it). null = practice mode.
+ * The URL must be a REAL http(s) URL: a deploy that passes an uninterpolated
+ * literal (Dokploy compose left `${APPRENTICE_BASE_URL:-}` verbatim on the
+ * first D3 deploy — caught live) must degrade to practice, not fake-live. */
 export function apprenticeConfig(): ApprenticeConfig | null {
   const baseUrl = (process.env.APPRENTICE_BASE_URL ?? '').trim().replace(/\/+$/, '')
-  if (!baseUrl) return null
+  if (!/^https?:\/\//i.test(baseUrl)) return null
   const modelCheap = (process.env.APPRENTICE_MODEL_CHEAP ?? '').trim()
   const modelSmart = (process.env.APPRENTICE_MODEL_SMART ?? '').trim()
   return {
