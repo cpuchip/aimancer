@@ -110,6 +110,7 @@ export function oracle(s: SimState, player: number, script: Script, ticks = 3): 
     uptime: 0,
     waste: 0,
     scripts: [],
+    pending: [],
   }
   let market = s.market
   const prediction: TickPrediction[] = []

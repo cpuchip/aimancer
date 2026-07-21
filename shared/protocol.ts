@@ -5,7 +5,7 @@
 // only to their own seat.
 
 import type { OracleReport } from './sim/oracle.ts'
-import type { DraftTier, Phase, RevealDelta, RoundSummary, Script, ScriptSlot, SimEvent, SimPhase, SlotStatus } from './sim/types.ts'
+import type { DraftTier, PendingDraft, Phase, RevealDelta, RoundSummary, Script, ScriptSlot, SimEvent, SimPhase, SlotStatus } from './sim/types.ts'
 
 export interface LobbyPlayer {
   index: number
@@ -54,7 +54,11 @@ export interface RoomView {
   round1Summary: RoundSummary | null // present from intermission on (the teaching backdrop)
   round2Summary: RoundSummary | null // present in reveal
   delta: RevealDelta | null // present in reveal — the thesis table
-  you: { index: number; hand: ScriptSlot[] } | null
+  /** 'live' = a real model is wired (APPRENTICE_BASE_URL); 'practice' = the
+   * seeded offline generator stands in (dev / un-wired deploys). */
+  apprentice: 'live' | 'practice'
+  /** `pending` = your own in-flight draft requests (the "drafting…" slots). */
+  you: { index: number; hand: ScriptSlot[]; pending: PendingDraft[] } | null
 }
 
 export type ClientMessage =
@@ -62,7 +66,8 @@ export type ClientMessage =
   | { type: 'watch'; room: string } // spectator (the big screen)
   | { type: 'start'; token: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number } // host hinge only
   | { type: 'phase'; token: string; to: SimPhase } // host hinge only — advance the weave
-  | { type: 'draft'; token: string; script: Script; tier: DraftTier } // WORKER token
+  | { type: 'draft'; token: string; script: Script; tier: DraftTier } // WORKER token — direct draft (custom/BYO)
+  | { type: 'draftRequest'; token: string; tier: DraftTier; order?: string } // either token — ask the apprentice (async)
   | { type: 'oracle'; token: string; id: string } // either token (verification is safe)
   | { type: 'arm'; token: string; id: string } // HINGE token ONLY
   | { type: 'disarm'; token: string; id: string } // either token (disarming is safe)

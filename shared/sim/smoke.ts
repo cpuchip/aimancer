@@ -10,6 +10,16 @@
 
 import { mulberry32 } from '../rng.ts'
 import {
+  draftFlawRoll,
+  fallbackDraft,
+  injectApprenticeFlaws,
+  parseDrafts,
+  practiceDrafts,
+  systemPrompt,
+} from '../apprentice.ts'
+import {
+  APPRENTICE_FLAW_CHEAP_PCT,
+  APPRENTICE_FLAW_SMART_PCT,
   BOOST_BLOWUP_WASTE,
   DEAD_SCRIPT_WASTE,
   DRAFT_COST_CHEAP,
@@ -736,6 +746,183 @@ console.log('event feed dedup')
   apply(s2, { t: 'phase', to: 'round2' }); snap2(); snap2()
   const phaseEvents = seen2.filter((e) => e.t === 'phase').length
   ok(phaseEvents === 2, `phase events cross the reset exactly once each (got ${phaseEvents})`)
+}
+
+// ── 20. The async apprentice: escrow economics (D3) ──────────────────────────
+console.log('async apprentice economics')
+{
+  const s = newGameR2(70)
+  const w = s.players[0]
+  ok(w.tokens === TOKEN_START, 'fixture opens at TOKEN_START')
+
+  // draftRequested debits IMMEDIATELY — the player pays before the model runs
+  apply(s, { t: 'draftRequested', reqId: 'q1', tier: 'smart' })
+  ok(w.tokens === TOKEN_START - DRAFT_COST_SMART, `a smart request debits ${DRAFT_COST_SMART} up front`)
+  ok(w.pending.length === 1 && w.pending[0].reqId === 'q1' && w.pending[0].tier === 'smart', 'the request sits in escrow')
+  ok(s.events.some((e) => e.t === 'draftRequested' && e.tier === 'smart'), 'the ask is a public event')
+  throws(() => apply(s, { t: 'draftRequested', reqId: 'q1', tier: 'cheap' }), 'duplicate reqId refused')
+
+  // arriving drafts are 0-cost — already paid
+  const before = w.tokens
+  apply(s, { t: 'draftAccepted', script: H(2), tier: 'smart', reqId: 'q1' })
+  apply(s, { t: 'draftAccepted', script: { id: 'h2', verb: 'sell', params: { amount: 2 } }, tier: 'smart', reqId: 'q1' })
+  ok(w.tokens === before, 'delivered drafts cost NOTHING extra (0-cost, already paid)')
+  ok(w.scripts.length === 2, 'both drafts landed in the hand')
+  throws(() => apply(s, { t: 'draftAccepted', script: { id: 'h3', verb: 'patch', params: { strength: 1 } }, tier: 'smart', reqId: 'zz' }), 'a delivery without escrow is refused')
+
+  // settle closes the escrow; the total cost of the whole round-trip = the tier price
+  apply(s, { t: 'draftSettled', reqId: 'q1' })
+  ok(w.pending.length === 0, 'settle clears the escrow')
+  ok(w.tokens === TOKEN_START - DRAFT_COST_SMART, 'request + 2 drafts + settle == exactly the tier price')
+  throws(() => apply(s, { t: 'draftSettled', reqId: 'q1' }), 'double-settle refused')
+
+  // the refund path: request + fail == net zero
+  apply(s, { t: 'draftRequested', reqId: 'q2', tier: 'cheap' })
+  const afterDebit = w.tokens
+  ok(afterDebit === TOKEN_START - DRAFT_COST_SMART - DRAFT_COST_CHEAP, 'cheap request debits too')
+  apply(s, { t: 'draftFailed', reqId: 'q2', reason: 'timeout' })
+  ok(w.tokens === afterDebit + DRAFT_COST_CHEAP, `a failed request refunds its ${DRAFT_COST_CHEAP}`)
+  ok(w.pending.length === 0, 'the failed escrow is gone')
+  ok(s.events.some((e) => e.t === 'draftFailed' && e.refund === DRAFT_COST_CHEAP), 'the refund is a public event (spoken-friendly)')
+  throws(() => apply(s, { t: 'draftFailed', reqId: 'q2' }), 'double-fail refused')
+
+  // broke: the request itself refuses
+  const poor = newGameR2(70)
+  poor.players[0].tokens = DRAFT_COST_CHEAP - 1
+  throws(() => apply(poor, { t: 'draftRequested', reqId: 'q1', tier: 'cheap' }), 'cannot request drafts without tokens')
+
+  // full hand: the request refuses up front (no doomed escrow)
+  const full = newGameR2(70)
+  full.players[0].tokens = TOKEN_CAP
+  for (let i = 0; i < MAX_SCRIPTS; i++) apply(full, { t: 'draftAccepted', script: { id: `s${i}`, verb: 'harvest', params: { rate: 1 } }, tier: 'cheap' })
+  throws(() => apply(full, { t: 'draftRequested', reqId: 'q1', tier: 'cheap' }), 'a full workshop cannot request drafts')
+
+  // refund respects the cap: no token minting through the refund door
+  const capped = newGameR2(70)
+  capped.players[0].tokens = TOKEN_CAP
+  apply(capped, { t: 'draftRequested', reqId: 'q1', tier: 'smart' })
+  for (let i = 0; i < 5; i++) tick(capped) // regen climbs back to the cap
+  ok(capped.players[0].tokens === TOKEN_CAP, 'regen restored the cap while the request was in flight')
+  apply(capped, { t: 'draftFailed', reqId: 'q1' })
+  ok(capped.players[0].tokens === TOKEN_CAP, 'the refund cannot push past TOKEN_CAP')
+}
+
+// ── 21. Hybrid hallucination: seeded, deterministic, at the tier rate ────────
+console.log('seeded flaw injection + parsing')
+{
+  const drafts = (): Script[] => [
+    { id: 'tmp', verb: 'harvest', params: { rate: 2 } },
+    { id: 'tmp', verb: 'sell', params: { amount: 3 } },
+    { id: 'tmp', verb: 'refine', params: { rate: 1 } },
+  ]
+  // same room+tick+seat+request → byte-identical output, every time
+  const a = injectApprenticeFlaws(drafts(), 4242, 7, 1, 'q3', 'cheap')
+  const b = injectApprenticeFlaws(drafts(), 4242, 7, 1, 'q3', 'cheap')
+  ok(JSON.stringify(a) === JSON.stringify(b), 'same room+tick+seat+request → same flaw pattern (deterministic)')
+  const patterns = new Set<string>()
+  for (let seed = 1; seed <= 30; seed++) {
+    patterns.add(injectApprenticeFlaws(drafts(), seed, 7, 1, 'q3', 'cheap').map((d) => (d.flawed ? 'F' : '.')).join(''))
+  }
+  ok(patterns.size > 1, `different rooms flaw differently (${patterns.size} distinct patterns across 30 seeds)`)
+
+  // flawed drafts are ALWAYS oracle-red; clean drafts pass through untouched
+  let flawedTotal = 0
+  let cleanIdentical = true
+  for (let r = 0; r < 50; r++) {
+    const out = injectApprenticeFlaws(drafts(), 99, r, 0, `q${r}`, 'cheap')
+    for (let i = 0; i < out.length; i++) {
+      if (out[i].flawed) {
+        flawedTotal++
+        if (staticCheck(out[i].script).ok) cleanIdentical = false // a flawed draft that passes the oracle breaks the contract
+      } else if (JSON.stringify(out[i].script) !== JSON.stringify(drafts()[i])) {
+        cleanIdentical = false
+      }
+    }
+  }
+  ok(flawedTotal > 0, `injection actually fires (${flawedTotal} flawed across 150 rolls)`)
+  ok(cleanIdentical, 'every flawed draft is oracle-RED; every clean draft is untouched')
+
+  // the tier rates hold (deterministic sample, so the bounds are stable)
+  function rate(tier: 'cheap' | 'smart'): number {
+    let flawed = 0
+    const N = 2000
+    for (let i = 0; i < N; i++) if (draftFlawRoll(1234, i % 40, i % 8, `r${i}`, i % 3, tier)) flawed++
+    return (flawed / N) * 100
+  }
+  const cheapRate = rate('cheap')
+  const smartRate = rate('smart')
+  ok(Math.abs(cheapRate - APPRENTICE_FLAW_CHEAP_PCT) < 5, `cheap flaw rate ≈ ${APPRENTICE_FLAW_CHEAP_PCT}% (measured ${cheapRate.toFixed(1)}%)`)
+  ok(Math.abs(smartRate - APPRENTICE_FLAW_SMART_PCT) < 4, `smart flaw rate ≈ ${APPRENTICE_FLAW_SMART_PCT}% (measured ${smartRate.toFixed(1)}%)`)
+  ok(cheapRate > smartRate, 'cheap hallucinates more than smart — you get what you pay for')
+
+  // practice mode: seeded, valid by construction, 2-3 drafts
+  const p1 = practiceDrafts(31337, 4, 0, 'q9', 'cheap')
+  const p2 = practiceDrafts(31337, 4, 0, 'q9', 'cheap')
+  ok(JSON.stringify(p1) === JSON.stringify(p2), 'practice drafts are deterministic (seeded)')
+  ok(p1.length >= 2 && p1.length <= 3, `practice serves 2-3 drafts (got ${p1.length})`)
+  ok(p1.every((d) => staticCheck({ ...d, id: 'x' }).ok), 'practice drafts are valid by construction (flaws come from injection)')
+
+  // the organic fallback is seeded and always red (an honest hallucination)
+  const f1 = fallbackDraft(31337, 4, 0, 'q9')
+  const f2 = fallbackDraft(31337, 4, 0, 'q9')
+  ok(JSON.stringify(f1) === JSON.stringify(f2), 'the gibberish fallback is deterministic')
+  ok(!staticCheck({ ...f1, id: 'x' }).ok, 'the gibberish fallback is oracle-RED (the apprentice really hallucinated)')
+
+  // defensive parsing (loom's lesson): strict, fenced, prose-wrapped, garbage
+  const strict = parseDrafts('[{"verb":"harvest","params":{"rate":2}},{"verb":"sell","params":{"amount":"3"}}]')
+  ok(strict.length === 2 && strict[0].verb === 'harvest', 'strict JSON parses')
+  ok(strict[1].params['amount'] === 3, 'numeric strings are coerced (models do that)')
+  const fenced = parseDrafts('Sure! Here are your drafts:\n```json\n[{"verb":"refine","params":{"rate":1}}]\n```\nEnjoy!')
+  ok(fenced.length === 1 && fenced[0].verb === 'refine', 'fenced JSON with prose parses (tolerated, not trusted)')
+  const wrapped = parseDrafts('I suggest: [{"verb":"patch","params":{"strength":4}}] — good luck')
+  ok(wrapped.length === 1 && wrapped[0].verb === 'patch', 'a bare array inside prose parses')
+  ok(parseDrafts('You should really harvest more, boss!').length === 0, 'pure prose parses to NOTHING (the organic path)')
+  ok(parseDrafts('').length === 0, 'empty content parses to nothing')
+  const hallucinated = parseDrafts('[{"verb":"transmogrify","params":{"vibes":11}}]')
+  ok(hallucinated.length === 1 && hallucinated[0].verb === 'transmogrify', 'semantic hallucinations SURVIVE parsing — catching them is the oracle\'s job')
+  const five = parseDrafts(JSON.stringify(Array.from({ length: 5 }, () => ({ verb: 'harvest', params: { rate: 1 } }))))
+  ok(five.length === 3, 'a chatty model is clamped to 3 drafts')
+
+  // the prompt teaches the REAL bounds (interpolated from balance.ts — no drift)
+  ok(systemPrompt().includes('"rate": integer 1..5') && systemPrompt().includes('"mult": integer 2..4'), 'the system prompt carries the live balance bounds')
+}
+
+// ── 22. Replay identity WITH the async apprentice flow ───────────────────────
+console.log('replay with async drafts')
+{
+  // the log a real room would write: request (paid) → world ticks while the
+  // model thinks → drafts arrive as data → settle; plus a failed request; the
+  // whole thing CROSSES the round-2 reseed (escrow carries).
+  const log: Array<Command | 'tick'> = [
+    { t: 'draftRequested', reqId: 'q1', tier: 'smart' },
+    'tick', 'tick', // latency absorbed — the world keeps moving
+    { t: 'draftAccepted', script: { id: 'q1a', verb: 'harvest', params: { rate: 3 } }, tier: 'smart', reqId: 'q1' },
+    { t: 'draftAccepted', script: { id: 'q1b', verb: 'harvst', params: { rate: 30 } }, tier: 'smart', reqId: 'q1' }, // a hallucination, as data
+    { t: 'draftSettled', reqId: 'q1' },
+    { t: 'arm', id: 'q1a' },
+    ...Array(10).fill('tick') as 'tick'[],
+    { t: 'draftRequested', reqId: 'q2', tier: 'cheap' }, // in flight across the phase line…
+    { t: 'phase', to: 'intermission' },
+    { t: 'phase', to: 'round2' },
+    { t: 'draftAccepted', script: { id: 'q2a', verb: 'sell', params: { amount: 2 } }, tier: 'cheap', reqId: 'q2' }, // …lands in round 2
+    { t: 'draftSettled', reqId: 'q2' },
+    { t: 'draftRequested', reqId: 'q3', tier: 'smart' },
+    'tick', 'tick',
+    { t: 'draftFailed', reqId: 'q3', reason: 'timeout' }, // refund, replayed identically
+    ...Array(6).fill('tick') as 'tick'[],
+  ]
+  const cfg = { round1: 12, round2: 19 }
+  const a = play(4141, log, 1, cfg)
+  const b = play(4141, log, 1, cfg)
+  ok(snap(a.s) === snap(b.s), 'identical seed+commands → identical state (LLM output rides the log as data)')
+  ok(stateHash(a.s) === stateHash(b.s), `replay hash proof with async drafts: ${stateHash(a.s)}`)
+  ok(a.s.players[0].scripts.some((sl) => sl.script.id === 'q2a'), 'a request paid in round 1 delivers into the round-2 hand (escrow carries the reseed)')
+  ok(a.s.players[0].pending.length === 0, 'no escrow left dangling')
+  ok(a.events.filter((e) => e.t === 'draftFailed').length === 1, 'the refund happened exactly once')
+  // and the economics held: q2 was paid in round 1 (reset wiped it), q3 refunded
+  const w = a.s.players[0]
+  const expectedFromR2 = Math.min(TOKEN_CAP, TOKEN_START + 8 * TOKEN_REGEN) // 8 round-2 ticks of regen (q3 pay+refund nets 0)
+  ok(w.tokens === expectedFromR2, `round-2 tokens are pure regen after the paid/refunded wash (${w.tokens})`)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

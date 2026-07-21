@@ -24,10 +24,12 @@ import {
   TICK_MS_MIN,
   seedFromCode,
 } from '../shared/mpConfig.ts'
+import { fallbackDraft, injectApprenticeFlaws, practiceDrafts, type SeatBrief } from '../shared/apprentice.ts'
 import type { ClientMessage, LobbyPlayer, PlayerView, RoomLogView, RoomView, ServerMessage } from '../shared/protocol.ts'
+import { apprenticeConfig, apprenticeMode, fetchDrafts } from './apprentice.ts'
 import { oracle } from '../shared/sim/oracle.ts'
 import { apply, computeDelta, newGame, RuleError, score, tick, ticksRemaining, ticksRunning } from '../shared/sim/sim.ts'
-import type { Command, SimState } from '../shared/sim/types.ts'
+import type { Command, DraftTier, Script, SimState } from '../shared/sim/types.ts'
 
 function send(ws: WebSocket, msg: ServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
@@ -56,6 +58,7 @@ export class Room {
   /** The full command log — replay is the take-home artifact (D5). */
   readonly log: Array<{ atTick: number; cmd: Command }> = []
   seats: Seat[] = []
+  private draftSerial = 0 // per-room apprentice request ids (q1, q2, …)
   private members = new Map<WebSocket, number>() // ws -> seat index
   private watchers = new Set<WebSocket>() // the big screen(s)
   private emptyAt: number | null = null
@@ -104,6 +107,15 @@ export class Room {
         if (!who) return send(ws, { type: 'error', message: 'bad token' })
         if (who.role !== 'worker') return send(ws, { type: 'error', message: 'drafts come from the worker surface — use the worker token' })
         const r = this.command({ t: 'draftAccepted', player: who.seat, script: msg.script, tier: msg.tier })
+        if (!r.ok) send(ws, { type: 'error', message: r.error })
+        return
+      }
+      case 'draftRequest': {
+        // asking the apprentice is safe from either surface (the drafts still
+        // land unarmed; the hinge stays the only way anything runs)
+        const who = this.auth(msg.token)
+        if (!who) return send(ws, { type: 'error', message: 'bad token' })
+        const r = this.requestDrafts(who.seat, msg.tier === 'smart' ? 'smart' : 'cheap', msg.order)
         if (!r.ok) send(ws, { type: 'error', message: r.error })
         return
       }
@@ -227,6 +239,89 @@ export class Room {
     }
   }
 
+  // ── The apprentice (D3): async draft flow, latency absorbed ────────────────
+  // draftRequested debits NOW; the LLM call runs in the background; arriving
+  // drafts enter the LOG as data (0-cost draftAccepted with the reqId), so a
+  // replay never re-calls the model. Timeout/gibberish paths refund or fall
+  // back — all through logged commands. Shared by ws and HTTP.
+
+  requestDrafts(seat: number, tier: DraftTier, order?: string): { ok: true; reqId: string } | { ok: false; error: string } {
+    const reqId = `q${++this.draftSerial}`
+    const r = this.command({ t: 'draftRequested', player: seat, reqId, tier })
+    if (!r.ok) return r
+    void this.fulfillDrafts(seat, tier, reqId, order) // background; every exit path is a logged command
+    return { ok: true, reqId }
+  }
+
+  /** What the apprentice may know: its OWN workshop + the public world. */
+  private seatBrief(seat: number): SeatBrief {
+    const sim = this.sim!
+    const w = sim.players[seat]
+    return {
+      phase: sim.phase,
+      tick: sim.tick,
+      market: sim.market,
+      gremlin: sim.gremlin,
+      tokens: w.tokens,
+      matter: w.matter,
+      widgets: w.widgets,
+      hand: w.scripts.map((sl) => ({
+        verb: sl.script.verb,
+        params: sl.script.params,
+        ...(sl.script.when ? { when: sl.script.when } : {}),
+        status: sl.status,
+        armed: sl.armed,
+      })),
+    }
+  }
+
+  private async fulfillDrafts(seat: number, tier: DraftTier, reqId: string, order?: string): Promise<void> {
+    try {
+      const cfg = apprenticeConfig()
+      let drafts: Script[]
+      let organic = false
+      if (!cfg) {
+        // PRACTICE MODE — no model wired; the seeded generator stands in
+        drafts = practiceDrafts(this.seed, this.sim!.tick, seat, reqId, tier)
+      } else {
+        try {
+          drafts = await fetchDrafts(cfg, tier, this.seatBrief(seat), order)
+        } catch (e) {
+          // network/timeout — refund through the log (spoken-friendly event)
+          console.log(`[apprentice] ${this.code} seat ${seat} ${reqId}: ${e instanceof Error ? e.message : e} — refunding`)
+          this.command({ t: 'draftFailed', player: seat, reqId, reason: 'timeout' })
+          return
+        }
+        if (drafts.length === 0) {
+          // ORGANIC hallucination: the model really returned gibberish — the
+          // player still gets a (flawed) draft; logged honestly
+          organic = true
+          console.log(`[apprentice] ${this.code} seat ${seat} ${reqId}: unparseable model output — organic hallucination fallback`)
+          drafts = [fallbackDraft(this.seed, this.sim!.tick, seat, reqId)]
+        }
+      }
+      // the hybrid design: seeded flaw injection at the tier rate, deterministic
+      // per room+tick+seat+request (organic fallback is already flawed)
+      const atTick = this.sim!.tick
+      const delivered = organic
+        ? drafts.map((script) => ({ script, flawed: true }))
+        : injectApprenticeFlaws(drafts, this.seed, atTick, seat, reqId, tier)
+      let landed = 0
+      delivered.forEach(({ script }, i) => {
+        script.id = `${reqId}${String.fromCharCode(97 + i)}` // q3a, q3b, q3c
+        const r = this.command({ t: 'draftAccepted', player: seat, script, tier, reqId })
+        if (r.ok) landed++
+        else console.log(`[apprentice] ${this.code} seat ${seat} ${reqId}: draft ${script.id} rejected (${r.error})`)
+      })
+      if (landed > 0) this.command({ t: 'draftSettled', player: seat, reqId })
+      else this.command({ t: 'draftFailed', player: seat, reqId, reason: 'no drafts landed' })
+    } catch (e) {
+      // belt and braces: never leave escrow dangling
+      console.error(`[apprentice] ${this.code} seat ${seat} ${reqId}: unexpected`, e)
+      this.command({ t: 'draftFailed', player: seat, reqId, reason: 'apprentice error' })
+    }
+  }
+
   private welcome(ws: WebSocket, index: number): void {
     const seat = this.seats[index]
     // the ONE message that carries auth tokens — to their own seat only
@@ -296,9 +391,10 @@ export class Room {
       round1Summary: sim?.round1Summary ?? null,
       round2Summary: sim?.round2Summary ?? null,
       delta: sim && sim.phase === 'reveal' ? computeDelta(sim) : null,
+      apprentice: apprenticeMode(),
       you:
         seatIndex !== null && sim && sim.players[seatIndex]
-          ? { index: seatIndex, hand: sim.players[seatIndex].scripts }
+          ? { index: seatIndex, hand: sim.players[seatIndex].scripts, pending: sim.players[seatIndex].pending }
           : null,
     }
   }

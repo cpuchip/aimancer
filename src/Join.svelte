@@ -1,25 +1,21 @@
 <script lang="ts">
   // The PHONE — one job per screen (Jackbox discipline):
   //   join → lobby → your workshop (hand of CARDS) → reveal.
-  // Drafts go through the WORKER token ("practice apprentice" — the hosted one
-  // is D3); Oracle/Arm/YOLO/Scrap act per card; the HINGE token stays here.
+  // "Ask for drafts" hits the REAL async apprentice flow (D3): pay now, the
+  // model drafts in the background, cards land when ready (or a refund does).
+  // Oracle/Arm/YOLO/Scrap act per card; the HINGE token stays here.
   import { clientKey, wsUrl } from './net.ts'
-  import { mulberry32 } from '../shared/rng.ts'
-  import { flawScript, sampleScript } from '../shared/sim/flaws.ts'
   import {
     DRAFT_COST_CHEAP,
     DRAFT_COST_SMART,
     ORACLE_COST,
-    PRACTICE_FLAW_CHEAP_PCT,
-    PRACTICE_FLAW_SMART_PCT,
     TOKEN_REGEN,
-    VERB_PARAMS,
   } from '../shared/sim/balance.ts'
   import { describeEvent, freshEvents, newFeedCursor } from '../shared/eventFeed.ts'
   import { PHASE_BANNER, describeCondition, describeParams, predictionSummary, scriptName, verbIcon } from './ui.ts'
   import type { ClientMessage, RoomView, ServerMessage } from '../shared/protocol.ts'
   import type { OracleReport } from '../shared/sim/oracle.ts'
-  import type { DraftTier, Script, ScriptSlot, SimPhase } from '../shared/sim/types.ts'
+  import type { DraftTier, ScriptSlot, SimPhase } from '../shared/sim/types.ts'
 
   let pin = $state('')
   let name = $state('')
@@ -34,12 +30,11 @@
   let reports = $state<Record<string, OracleReport>>({})
   let tickMs = $state(25000)
   let customJson = $state('')
-  let draftSerial = 1
+  let order = $state('') // optional steer for the apprentice (advanced layer)
   let eventLog = $state<string[]>([])
   const feedCursor = newFeedCursor()
 
   let ws: WebSocket | null = null
-  const flawPrng = mulberry32(Date.now() >>> 0) // client-side comedy only — the sim never sees this PRNG
 
   function send(msg: ClientMessage): void {
     ws?.send(JSON.stringify(msg))
@@ -78,35 +73,12 @@
     }
   }
 
-  function nextId(): string {
-    return `${name.toLowerCase().slice(0, 6) || 'me'}-${draftSerial++}-${Math.floor(Math.random() * 1000)}`
-  }
-
-  /** The PRACTICE apprentice (D1 stub; the hosted one is D3): a random verb,
-   * plausible params, sometimes a condition — and a tier-dependent chance the
-   * whole thing is a confident hallucination. You won't be told which. */
+  /** Ask the REAL apprentice (D3): tokens debited now, the server calls the
+   * model in the background, drafts land in the hand when ready (a pending
+   * "drafting…" slot shows meanwhile; a timeout refunds). With no model wired
+   * the server's seeded practice generator answers instead. */
   function askApprentice(tier: DraftTier): void {
-    const verbs = Object.keys(VERB_PARAMS)
-    const verb = verbs[Math.floor(flawPrng() * verbs.length) % verbs.length]
-    const s = sampleScript(verb, nextId())
-    for (const sp of VERB_PARAMS[verb] ?? []) {
-      // smart drafts lean toward stronger params; cheap drafts wander
-      const span = sp.max - sp.min
-      const roll = tier === 'smart' ? 0.5 + flawPrng() * 0.5 : flawPrng()
-      s.params[sp.name] = sp.min + Math.round(span * roll)
-    }
-    if (flawPrng() < 0.35) {
-      const conds: Script['when'][] = [
-        { field: 'market', op: '>=', value: 5 },
-        { field: 'matter', op: '>', value: 6 },
-        { field: 'gremlin', op: '<', value: 5 },
-        { field: 'widgets', op: '>', value: 2 },
-      ]
-      s.when = conds[Math.floor(flawPrng() * conds.length) % conds.length]
-    }
-    const flawPct = tier === 'smart' ? PRACTICE_FLAW_SMART_PCT : PRACTICE_FLAW_CHEAP_PCT
-    const script = flawPrng() * 100 < flawPct ? flawScript(s, flawPrng).script : s
-    send({ type: 'draft', token: workerToken, script, tier })
+    send({ type: 'draftRequest', token: workerToken, tier, order: order.trim() || undefined })
   }
 
   function draftCustom(): void {
@@ -222,16 +194,27 @@
         </div>
       {/if}
 
-      <h2>Practice apprentice <span class="faint">(the real one arrives D3)</span></h2>
+      <h2>Your apprentice {#if view?.apprentice === 'practice'}<span class="faint">(practice mode — no model wired)</span>{/if}</h2>
+      <input placeholder="optional: tell it what you want (e.g. 'harvest fast')" bind:value={order} maxlength="200" autocomplete="off" />
       <div class="row">
-        <button class="grow" onclick={() => askApprentice('cheap')} disabled={!canAct}>🤖 Ask for a draft — cheap ({DRAFT_COST_CHEAP}⚡)</button>
+        <button class="grow" onclick={() => askApprentice('cheap')} disabled={!canAct}>🤖 Ask for drafts — cheap ({DRAFT_COST_CHEAP}⚡)</button>
         <button class="grow" onclick={() => askApprentice('smart')} disabled={!canAct}>🧠 smart ({DRAFT_COST_SMART}⚡)</button>
       </div>
 
       <h2>Your hand</h2>
-      {#if me && me.hand.length === 0}
+      {#if me && me.hand.length === 0 && me.pending.length === 0}
         <div class="card"><p class="muted" style="margin:0">No scripts yet — ask your apprentice for a draft.</p></div>
       {/if}
+      {#each me?.pending ?? [] as pd (pd.reqId)}
+        <div class="script-card pending-card">
+          <div class="row">
+            <span>🤖</span>
+            <span class="name">drafting<span class="dots">…</span></span>
+            <span class="chip drafted">{pd.tier} · paid</span>
+          </div>
+          <div class="desc"><div class="faint">the apprentice is thinking — keep playing, cards land when ready</div></div>
+        </div>
+      {/each}
       {#each me?.hand ?? [] as card (card.script.id)}
         {@const chip = statusChip(card)}
         {@const report = reports[card.script.id]}

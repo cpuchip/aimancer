@@ -12,6 +12,13 @@ services:
     restart: unless-stopped
     environment:
       - PORT=8080
+      # Apprentice LLM (optional — unset = practice mode, still fully playable).
+      # Set the values in the deploy environment (Dokploy env), never here.
+      - APPRENTICE_BASE_URL=${APPRENTICE_BASE_URL:-}
+      - APPRENTICE_MODEL_CHEAP=${APPRENTICE_MODEL_CHEAP:-}
+      - APPRENTICE_MODEL_SMART=${APPRENTICE_MODEL_SMART:-}
+      - APPRENTICE_API_KEY=${APPRENTICE_API_KEY:-}
+      - APPRENTICE_TIMEOUT_MS=${APPRENTICE_TIMEOUT_MS:-}
     expose:
       - "8080"
     healthcheck:

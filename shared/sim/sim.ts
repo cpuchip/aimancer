@@ -87,6 +87,7 @@ function newWorkshop(name: string): Workshop {
     uptime: 0,
     waste: 0,
     scripts: [],
+    pending: [],
   }
 }
 
@@ -131,8 +132,10 @@ function summarize(s: SimState): RoundSummary {
 
 /** Round 2's level playing field: fresh world, SAME seed (schedules are
  * f(seed, tick), and tick resets — so round 2 replays round 1's market and
- * gremlin schedule exactly). Players keep their names and their un-played
- * drafts (the hand they stocked during intermission); everything else resets. */
+ * gremlin schedule exactly). Players keep their names, their un-played
+ * drafts (the hand they stocked during intermission), AND their in-flight
+ * apprentice requests (paid escrow — the drafts land in the round-2 hand);
+ * everything else resets. */
 function reseedRound2(s: SimState): void {
   s.tick = 0
   s.market = MARKET_BASE
@@ -148,6 +151,7 @@ function reseedRound2(s: SimState): void {
     w.scripts = w.scripts
       .filter((sl) => sl.status === 'drafted')
       .map((sl) => ({ script: sl.script, armed: false, everGreen: false, yolo: false, status: 'drafted' as const, lastVerdict: null }))
+    // w.pending carries as-is: the request was paid, the drafts are still owed
   }
 }
 
@@ -220,13 +224,30 @@ export function apply(s: SimState, cmd: Command): void {
   const w = s.players[p]
   if (!w) fail('no such player')
   switch (cmd.t) {
+    case 'draftRequested': {
+      // pay NOW — the apprentice bills up front, drafts arrive when they arrive
+      if (typeof cmd.reqId !== 'string' || cmd.reqId.length < 1 || cmd.reqId.length > 40) fail('reqId must be a 1-40 char string')
+      if (w.pending.some((pd) => pd.reqId === cmd.reqId)) fail(`duplicate request id '${cmd.reqId}'`)
+      if (w.scripts.length >= MAX_SCRIPTS) fail(`workshop is full (${MAX_SCRIPTS} scripts) — scrap something first`)
+      const cost = draftCost(cmd.tier)
+      if (w.tokens < cost) fail(`not enough tokens (a ${cmd.tier} draft costs ${cost})`)
+      w.tokens -= cost
+      w.pending.push({ reqId: cmd.reqId, tier: cmd.tier })
+      emit(s, { t: 'draftRequested', player: p, tier: cmd.tier })
+      return
+    }
     case 'draftAccepted': {
       validateShape(cmd.script)
-      const cost = draftCost(cmd.tier)
       if (w.scripts.length >= MAX_SCRIPTS) fail(`workshop is full (${MAX_SCRIPTS} scripts)`)
       if (w.scripts.some((sl) => sl.script.id === cmd.script.id)) fail(`duplicate script id '${cmd.script.id}'`)
-      if (w.tokens < cost) fail(`not enough tokens (draft costs ${cost})`)
-      w.tokens -= cost // the apprentice spends your tokens even on a hallucination
+      if (cmd.reqId !== undefined) {
+        // an async delivery — already paid at draftRequested; escrow must exist
+        if (!w.pending.some((pd) => pd.reqId === cmd.reqId)) fail(`no pending draft request '${cmd.reqId}'`)
+      } else {
+        const cost = draftCost(cmd.tier)
+        if (w.tokens < cost) fail(`not enough tokens (draft costs ${cost})`)
+        w.tokens -= cost // the apprentice spends your tokens even on a hallucination
+      }
       w.scripts.push({
         script: cmd.script,
         armed: false,
@@ -236,6 +257,23 @@ export function apply(s: SimState, cmd: Command): void {
         lastVerdict: null,
       })
       emit(s, { t: 'drafted', player: p, id: cmd.script.id, tier: cmd.tier })
+      return
+    }
+    case 'draftSettled': {
+      // the batch is fully delivered — close the escrow, nothing to refund
+      const i = w.pending.findIndex((pd) => pd.reqId === cmd.reqId)
+      if (i < 0) fail(`no pending draft request '${cmd.reqId}'`)
+      w.pending.splice(i, 1)
+      return
+    }
+    case 'draftFailed': {
+      // the apprentice came back empty (timeout, gibberish, full hand) — refund
+      const i = w.pending.findIndex((pd) => pd.reqId === cmd.reqId)
+      if (i < 0) fail(`no pending draft request '${cmd.reqId}'`)
+      const [pd] = w.pending.splice(i, 1)
+      const refund = draftCost(pd.tier)
+      w.tokens = Math.min(TOKEN_CAP, w.tokens + refund)
+      emit(s, { t: 'draftFailed', player: p, tier: pd.tier, refund })
       return
     }
     case 'oracleCheck': {

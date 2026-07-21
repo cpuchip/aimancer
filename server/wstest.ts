@@ -6,19 +6,28 @@
 // Covers: room create (PIN alphabet), join, host-hinge start, the TWO-TOKEN
 // SEAT SPLIT (a worker token's arm attempt MUST be rejected — ws and HTTP),
 // drafts, oracle reports, tick auto-advance, reconnect-by-key with stable
-// tokens, and the REDACTION AUDIT: other players' hands and ALL auth tokens
-// never cross the wire to the wrong seat.
+// tokens, the ASYNC APPRENTICE round-trip against a hermetic fake OpenAI
+// endpoint (debit-now, drafts-arrive-later, fenced-JSON tolerance, gibberish
+// fallback, timeout+refund), the FULL HTTP action mirror (oracle/disarm/
+// scrap/draft-request — token rules + 409 sim refusals), practice mode on a
+// second unconfigured server, and the REDACTION AUDIT: other players' hands
+// and ALL auth tokens never cross the wire to the wrong seat.
 
 import { spawn } from 'node:child_process'
+import { createServer } from 'node:http'
+import type { Socket } from 'node:net'
 import WebSocket from 'ws'
 import { freshEvents, newFeedCursor } from '../shared/eventFeed.ts'
 import { CODE_ALPHABET, ROUND2_TICKS_DEFAULT, seedFromCode } from '../shared/mpConfig.ts'
-import { TOKEN_START } from '../shared/sim/balance.ts'
+import { DRAFT_COST_CHEAP, DRAFT_COST_SMART, ORACLE_COST, TOKEN_START } from '../shared/sim/balance.ts'
+import { staticCheck } from '../shared/sim/oracle.ts'
 import type { SimEvent } from '../shared/sim/types.ts'
 import type { ClientMessage, RoomLogView, RoomView, ServerMessage } from '../shared/protocol.ts'
 
 const PORT = 18643
 const BASE = `http://localhost:${PORT}`
+const PRACTICE_PORT = 18644
+const FAKE_LLM_PORT = 18645
 
 let passed = 0
 let failed = 0
@@ -116,18 +125,57 @@ class TestClient {
   }
 }
 
-async function main(): Promise<void> {
-  const server = spawn('npx', ['tsx', 'server/index.ts'], {
-    env: { ...process.env, PORT: String(PORT) },
+/** Hermetic fake OpenAI-compatible endpoint. The player's ORDER text (which
+ * rides the user message) selects the behavior: HANG never answers (timeout
+ * path), GARBAGE answers in prose (organic-fallback path), FENCED wraps the
+ * JSON in a markdown fence (tolerance path); default = 2 clean drafts. */
+function startFakeLLM(): { close: () => void } {
+  const hung = new Set<Socket>()
+  const srv = createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      const reply = (content: string) => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ id: 'fake', choices: [{ message: { role: 'assistant', content } }] }))
+      }
+      if (body.includes('HANG')) {
+        hung.add(req.socket) // never respond — the room must refund on timeout
+        return
+      }
+      if (body.includes('GARBAGE')) return reply('You should really harvest more, boss! Trust me.')
+      if (body.includes('FENCED')) return reply('Here you go:\n```json\n[{"verb":"refine","params":{"rate":1}}]\n```\nEnjoy!')
+      return reply(
+        JSON.stringify([
+          { verb: 'harvest', params: { rate: 2 } },
+          { verb: 'sell', params: { amount: 2 }, when: { field: 'widgets', op: '>', value: 0 } },
+        ]),
+      )
+    })
+  })
+  srv.listen(FAKE_LLM_PORT)
+  return {
+    close: () => {
+      for (const s of hung) s.destroy()
+      srv.close()
+    },
+  }
+}
+
+function spawnGame(port: number, extraEnv: Record<string, string>): ReturnType<typeof spawn> {
+  return spawn('npx', ['tsx', 'server/index.ts'], {
+    env: { ...process.env, PORT: String(port), ...extraEnv },
     // stderr must be 'pipe', not 'inherit': an inherited fd ties our pipeline
     // to the child's lifetime (chips' lesson).
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: process.platform === 'win32',
   })
-  server.stderr.on('data', (d: Buffer) => process.stderr.write(d))
+}
+
+async function awaitBoot(server: ReturnType<typeof spawn>): Promise<void> {
   await new Promise<void>((res, rej) => {
     const to = setTimeout(() => rej(new Error('server did not boot')), 20000)
-    server.stdout.on('data', (d: Buffer) => {
+    server.stdout!.on('data', (d: Buffer) => {
       if (String(d).includes('aimancer server on')) {
         clearTimeout(to)
         res()
@@ -135,6 +183,36 @@ async function main(): Promise<void> {
     })
     server.on('exit', () => rej(new Error('server exited early')))
   })
+}
+
+async function killGame(server: ReturnType<typeof spawn>): Promise<void> {
+  // Windows: kill() only reaches the cmd.exe shell wrapper — taskkill /T
+  // takes the real node process down with it. AWAIT it (chips' lesson).
+  if (process.platform === 'win32' && server.pid) {
+    await new Promise<void>((res) => {
+      const k = spawn('taskkill', ['/pid', String(server.pid), '/T', '/F'], { shell: true })
+      k.on('exit', () => res())
+      k.on('error', () => res())
+      setTimeout(res, 3000)
+    })
+  } else {
+    server.kill()
+  }
+}
+
+async function main(): Promise<void> {
+  const fakeLLM = startFakeLLM()
+  // the MAIN server gets the fake apprentice endpoint (live mode) with a short
+  // timeout so the HANG test resolves inside the suite
+  const server = spawnGame(PORT, {
+    APPRENTICE_BASE_URL: `http://localhost:${FAKE_LLM_PORT}/v1`,
+    APPRENTICE_MODEL_CHEAP: 'fake-cheap',
+    APPRENTICE_MODEL_SMART: 'fake-smart',
+    APPRENTICE_TIMEOUT_MS: '1500',
+  })
+  let practiceServer: ReturnType<typeof spawn> | null = null
+  server.stderr!.on('data', (d: Buffer) => process.stderr.write(d))
+  await awaitBoot(server)
 
   try {
     // ── HTTP surface: the deploy oracles ─────────────────────────────────────
@@ -440,6 +518,193 @@ async function main(): Promise<void> {
       ok(rawAppendCount > 1, `the D1 bug was real: the same event crossed the wire in ${rawAppendCount} snapshots (naive append would duplicate)`)
     }
 
+    // ── THE ASYNC APPRENTICE (D3): full round-trip against the fake LLM ──────
+    // Dave's solo room. 60s tick = no regen noise; every token count is exact.
+    const dave = new TestClient('key-dave', 'Dave')
+    await dave.open('')
+    await dave.waitFor((m) => m.type === 'welcome', 'dave welcome')
+    const davePin = dave.welcome!.room
+    dave.send({ type: 'start', token: dave.welcome!.hingeToken, tickMs: 60000 })
+    await dave.waitView((v) => v.started, 'dave started')
+    ok(dave.view!.apprentice === 'live', "state says apprentice: 'live' (a model is wired)")
+
+    // happy path: ask (ws, worker token) → debit NOW → drafts land async, 0-cost
+    dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'smart' })
+    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 2, 'smart drafts arrived')
+    ok(dave.view!.players[0].tokens === TOKEN_START - DRAFT_COST_SMART, `the request debited exactly ${DRAFT_COST_SMART} — the arriving drafts were free (already paid)`)
+    ok(dave.view!.you!.pending.length === 0, 'the escrow settled once the batch landed')
+    const daveVerbs = dave.view!.you!.hand.map((sl) => sl.script.verb).sort()
+    ok(daveVerbs.join(',') === 'harvest,sell', `the REAL model's verbs came through (${daveVerbs.join('+')}) — flaw injection never touches the verb`)
+    ok(dave.view!.you!.hand.every((sl) => sl.script.id.startsWith('q1')), 'server-assigned draft ids (q1a, q1b)')
+
+    // timeout path: HANG → pending slot visible, then refund via draftFailed
+    dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'cheap', order: 'HANG' })
+    await dave.waitView((v) => (v.you?.pending.length ?? 0) === 1, 'pending request visible while the model hangs')
+    ok(dave.view!.players[0].tokens === TOKEN_START - DRAFT_COST_SMART - DRAFT_COST_CHEAP, 'the debit landed the moment we asked (drafting… still in flight)')
+    await dave.waitView((v) => (v.you?.pending.length ?? 0) === 0 && v.players[0].tokens === TOKEN_START - DRAFT_COST_SMART, 'timeout refunded')
+    ok(true, `a hung model times out and REFUNDS the ${DRAFT_COST_CHEAP} (draftFailed in the log)`)
+    ok((dave.view!.you?.hand.length ?? 0) === 2, 'and no draft landed from the hang')
+    ok(dave.snapshotRaws.some((r) => r.includes('"t":"draftFailed"')), 'the refund event crossed the wire (feed line for the board)')
+
+    // fenced-JSON tolerance: prose + ```json fence still parses
+    dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'cheap', order: 'FENCED' })
+    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 3, 'fenced draft arrived')
+    ok(dave.view!.you!.hand.some((sl) => sl.script.verb === 'refine' && sl.script.id === 'q3a'), 'fenced JSON tolerated — the refine draft landed')
+
+    // gibberish → the ORGANIC hallucination fallback (a flawed preset, no refund)
+    dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'cheap', order: 'GARBAGE' })
+    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 4, 'gibberish fallback arrived')
+    const organic = dave.view!.you!.hand.find((sl) => sl.script.id === 'q4a')
+    ok(organic !== undefined, 'unparseable model output still serves a draft (the organic path)')
+    ok(organic !== undefined && !staticCheck(organic.script).ok, 'and the organic fallback is oracle-RED — an honest hallucination')
+
+    // HTTP mirror: draft-request works with EITHER token (here: the hinge)
+    const httpReq = await fetch(`${BASE}/api/room/${davePin}/draft-request`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.hingeToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ tier: 'cheap' }),
+    })
+    const httpReqBody = await httpReq.json()
+    ok(httpReq.status === 200 && httpReqBody.ok && httpReqBody.reqId === 'q5', `HTTP draft-request lands with the hinge token too (either surface may ask; reqId ${httpReqBody.reqId})`)
+    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 6, 'HTTP-requested drafts arrived')
+    const reqNoToken = await fetch(`${BASE}/api/room/${davePin}/draft-request`, { method: 'POST', body: '{"tier":"cheap"}' })
+    ok(reqNoToken.status === 401, 'HTTP draft-request with no token → 401')
+
+    // HTTP oracle in ROUND 1 → 409 with the sim's spoken reason
+    const oracleR1 = await fetch(`${BASE}/api/room/${davePin}/oracle`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'q1a' }),
+    })
+    const oracleR1Body = await oracleR1.json()
+    ok(oracleR1.status === 409 && oracleR1Body.ok === false && oracleR1Body.error.includes("hasn't been invented"), `sim refusals are 409 with the spoken reason ("${oracleR1Body.error}")`)
+
+    // advance dave's solo room to round 2 — the full-rules phase
+    dave.send({ type: 'phase', token: dave.welcome!.hingeToken, to: 'intermission' })
+    await dave.waitView((v) => v.phase === 'intermission', 'dave intermission')
+    dave.send({ type: 'phase', token: dave.welcome!.hingeToken, to: 'round2' })
+    await dave.waitView((v) => v.phase === 'round2', 'dave round2')
+    ok(dave.view!.players[0].tokens === TOKEN_START, 'round-2 reset: a clean token slate for the HTTP mirror tests')
+
+    // HTTP direct draft of a KNOWN-green script, then the full mirror:
+    // oracle (either token, full report) → arm (hinge) → disarm (either) → scrap
+    const dvDraft = await fetch(`${BASE}/api/room/${davePin}/draft`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ script: { id: 'dv1', verb: 'harvest', params: { rate: 2 } }, tier: 'cheap' }),
+    })
+    ok(dvDraft.status === 200, 'HTTP direct draft still works (the BYO path)')
+    const oracleOk = await fetch(`${BASE}/api/room/${davePin}/oracle`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'dv1' }),
+    })
+    const oracleOkBody = await oracleOk.json()
+    ok(oracleOk.status === 200 && oracleOkBody.ok && oracleOkBody.report.ok && oracleOkBody.report.prediction.length === 3, 'HTTP oracle (worker token) returns the verdict + 3-tick dry-run')
+    await dave.waitView((v) => v.players[0].tokens === TOKEN_START - DRAFT_COST_CHEAP - ORACLE_COST, 'oracle billed over HTTP')
+    const armHttp = await fetch(`${BASE}/api/room/${davePin}/arm`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.hingeToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'dv1' }),
+    })
+    ok(armHttp.status === 200, 'HTTP arm (hinge) lands')
+    const disarmHttp = await fetch(`${BASE}/api/room/${davePin}/disarm`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'dv1' }),
+    })
+    ok(disarmHttp.status === 200, 'HTTP disarm with the WORKER token lands (turning OFF is always safe — matches ws)')
+    const disarmAgain = await fetch(`${BASE}/api/room/${davePin}/disarm`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'dv1' }),
+    })
+    const disarmAgainBody = await disarmAgain.json()
+    ok(disarmAgain.status === 409 && disarmAgainBody.ok === false && typeof disarmAgainBody.error === 'string', 'double-disarm → 409 with the consistent { ok:false, error } shape')
+    const scrapHttp = await fetch(`${BASE}/api/room/${davePin}/scrap`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'dv1' }),
+    })
+    ok(scrapHttp.status === 200, 'HTTP scrap (worker token) frees the slot')
+    await dave.waitView((v) => !v.you!.hand.some((sl) => sl.script.id === 'dv1'), 'dv1 gone after HTTP scrap')
+    const scrapGhost = await fetch(`${BASE}/api/room/${davePin}/scrap`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'ghost' }),
+    })
+    ok(scrapGhost.status === 409, 'scrapping a nonexistent script → 409 (the sim said no)')
+    const oracleNoId = await fetch(`${BASE}/api/room/${davePin}/oracle`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: '{}',
+    })
+    ok(oracleNoId.status === 400, 'malformed request (missing id) → 400, distinct from sim refusals')
+
+    // the organic q4a draft is oracle-RED over the wire too
+    const oracleOrganic = await fetch(`${BASE}/api/room/${davePin}/oracle`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'q4a' }),
+    })
+    const oracleOrganicBody = await oracleOrganic.json()
+    ok(oracleOrganic.status === 200 && oracleOrganicBody.report.ok === false, 'the oracle catches the organic hallucination over HTTP (paid check, red verdict)')
+    dave.close()
+
+    // a finished room refuses new requests with the same spoken-reason shape
+    const revealReq = await fetch(`${BASE}/api/room/${pin}/draft-request`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${bob.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ tier: 'cheap' }),
+    })
+    const revealReqBody = await revealReq.json()
+    ok(revealReq.status === 409 && revealReqBody.error.includes('over'), 'draft-request after the reveal → 409 (the game is a museum)')
+
+    // ── PRACTICE MODE: a second server with NO model wired ───────────────────
+    practiceServer = spawnGame(PRACTICE_PORT, { APPRENTICE_BASE_URL: '' })
+    await awaitBoot(practiceServer)
+    // TestClient is pinned to PORT — drive the practice server raw
+    const praWs = new WebSocket(`ws://localhost:${PRACTICE_PORT}/ws`)
+    const praMsgs: ServerMessage[] = []
+    const praWaiters: Array<() => void> = []
+    praWs.on('message', (raw) => {
+      praMsgs.push(JSON.parse(String(raw)) as ServerMessage)
+      for (const w of praWaiters.splice(0)) w()
+    })
+    const praWait = async (pred: (m: ServerMessage) => boolean, what: string): Promise<ServerMessage> => {
+      const start = Date.now()
+      for (;;) {
+        const hit = praMsgs.find(pred)
+        if (hit) return hit
+        if (Date.now() - start > 8000) throw new Error(`timeout: ${what}`)
+        await new Promise<void>((res) => {
+          const t = setTimeout(res, 100)
+          praWaiters.push(() => {
+            clearTimeout(t)
+            res()
+          })
+        })
+      }
+    }
+    await new Promise<void>((res, rej) => {
+      praWs.once('open', () => res())
+      praWs.once('error', rej)
+    })
+    praWs.send(JSON.stringify({ type: 'join', room: '', name: 'Erin', key: 'key-erin' } satisfies ClientMessage))
+    const praWelcome = (await praWait((m) => m.type === 'welcome', 'practice welcome')) as Extract<ServerMessage, { type: 'welcome' }>
+    praWs.send(JSON.stringify({ type: 'start', token: praWelcome.hingeToken, tickMs: 60000 } satisfies ClientMessage))
+    await praWait((m) => m.type === 'snapshot' && m.view.started, 'practice started')
+    praWs.send(JSON.stringify({ type: 'draftRequest', token: praWelcome.workerToken, tier: 'cheap' } satisfies ClientMessage))
+    const praDone = (await praWait(
+      (m) => m.type === 'snapshot' && (m.view.you?.hand.length ?? 0) >= 2 && (m.view.you?.pending.length ?? 0) === 0,
+      'practice drafts landed',
+    )) as Extract<ServerMessage, { type: 'snapshot' }>
+    ok(praDone.view.apprentice === 'practice', "no APPRENTICE_BASE_URL → state says apprentice: 'practice' (dev/deploy degrade gracefully)")
+    const praHand = praDone.view.you!.hand
+    ok(praHand.length >= 2 && praHand.length <= 3, `practice mode serves 2-3 seeded drafts with no LLM anywhere (got ${praHand.length})`)
+    ok(praDone.view.players[0].tokens === TOKEN_START - DRAFT_COST_CHEAP, 'practice mode bills the same economy (debit at request, drafts free)')
+    praWs.close()
+
     // ── REDACTION AUDIT over everything that crossed the wire ────────────────
     const allTokens = [
       alice.welcome!.workerToken,
@@ -478,18 +743,9 @@ async function main(): Promise<void> {
     bob2.close()
     board.close()
   } finally {
-    // Windows: kill() only reaches the cmd.exe shell wrapper — taskkill /T
-    // takes the real node process down with it. AWAIT it (chips' lesson).
-    if (process.platform === 'win32' && server.pid) {
-      await new Promise<void>((res) => {
-        const k = spawn('taskkill', ['/pid', String(server.pid), '/T', '/F'], { shell: true })
-        k.on('exit', () => res())
-        k.on('error', () => res())
-        setTimeout(res, 3000)
-      })
-    } else {
-      server.kill()
-    }
+    fakeLLM.close()
+    await killGame(server)
+    if (practiceServer) await killGame(practiceServer)
   }
 
   console.log(`\n${passed} passed, ${failed} failed`)

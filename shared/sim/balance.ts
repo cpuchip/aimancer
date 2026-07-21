@@ -10,10 +10,14 @@ export const DRAFT_COST_SMART = 8 // smart-model draft: pricier, better hit-rate
 export const ORACLE_COST = 4 // one oracle verification
 export const SCRAP_COST = 0 // scrapping is hygiene — the dead script already cost you
 
-// ── Practice apprentice (the D1 stub; D3 replaces it with the hosted one) ────
-// Chance (per 100) that a requested draft comes back subtly hallucinated.
-export const PRACTICE_FLAW_CHEAP_PCT = 45
-export const PRACTICE_FLAW_SMART_PCT = 15
+// ── Apprentice hallucination rates (the hybrid design, D3) ───────────────────
+// Chance (per 100) that a delivered draft is subtly hallucinated. Applied as
+// SEEDED FLAW INJECTION on real-model drafts at arrival (deterministic per
+// room+tick+seat — see shared/apprentice.ts) and on practice-mode drafts the
+// same way. Keeps the comedy rate a tuning knob regardless of model quality;
+// a model that returns actual gibberish adds ORGANIC hallucinations on top.
+export const APPRENTICE_FLAW_CHEAP_PCT = 45
+export const APPRENTICE_FLAW_SMART_PCT = 15
 
 // ── Hand / script queue ──────────────────────────────────────────────────────
 export const MAX_SCRIPTS = 8 // total scripts a workshop can hold (hand + armed + dead)

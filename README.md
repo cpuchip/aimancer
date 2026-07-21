@@ -29,14 +29,63 @@ npm run dev          # vite client on :5175 (proxies /ws and /api to :8080)
 Production build: `npm run build` then `npm run serve` (serves `dist/` +
 `/healthz` + `/version`). Docker: `docker compose up --build`.
 
+## The apprentice (pluggable LLM)
+
+Each seat's apprentice is a real model behind any **OpenAI-compatible chat
+endpoint** — configured by env (see `.env.example`; never commit values):
+`APPRENTICE_BASE_URL`, `APPRENTICE_MODEL_CHEAP`, `APPRENTICE_MODEL_SMART`,
+`APPRENTICE_API_KEY` (optional), `APPRENTICE_TIMEOUT_MS` (default 20s).
+With `APPRENTICE_BASE_URL` unset the server runs **practice mode**: a seeded
+offline generator answers draft requests — no LLM anywhere, same economy,
+same flaw rates, fully playable (the UI labels it).
+
+The flow is **async**: a draft request debits tokens IMMEDIATELY (cheap 3 /
+smart 8), the model runs in the background, and the drafts land in your hand
+when ready — the ~25s world tick absorbs the latency. A timeout refunds
+through the log. **Hybrid hallucination:** real drafts get seeded flaw
+injection at the tier rate (cheap 45% / smart 15%, `balance.ts`) from the
+room's noise stream — deterministic per room+tick+seat. A model that returns
+actual gibberish serves a flawed preset instead (an *organic* hallucination,
+logged honestly). LLM output enters the command log **as data** — replays
+never re-call a model.
+
+## HTTP API (the BYO-agent surface)
+
+Auth: `Authorization: Bearer <token>` (or `?token=`). Every seat holds TWO
+tokens from the ws `welcome`: a **worker token** (the AI surface) and a
+**hinge token** (the human surface). ARM REQUIRES THE HINGE — there is no
+AI-reachable arm path, by design.
+
+| Route | Method | Token | Does |
+|---|---|---|---|
+| `/api/room/:pin/state` | GET | any/none | redacted room view (a seat token adds `you.hand` + `you.pending`) |
+| `/api/room/:pin/log` | GET | any/none | command log + seed (other seats' draft bodies stripped; host unlocks all in reveal) |
+| `/api/room/:pin/draft` | POST | worker | `{script, tier?}` — submit a script you wrote (costs tier price) |
+| `/api/room/:pin/draft-request` | POST | either | `{tier, order?}` — ask the apprentice; debits now, drafts arrive async (poll state) |
+| `/api/room/:pin/oracle` | POST | either | `{id}` — paid verify; returns the verdict + 3-tick dry-run report (round 2 only) |
+| `/api/room/:pin/arm` | POST | **hinge** | `{id}` — the human act; worker tokens get 403 |
+| `/api/room/:pin/disarm` | POST | either | `{id}` — turning OFF is always safe |
+| `/api/room/:pin/scrap` | POST | either | `{id}` — free an (unarmed) hand slot |
+
+Errors are always `{ ok: false, error }`: **401** no/unknown token · **403**
+wrong surface (e.g. worker tries to arm) · **404** no such room · **405**
+wrong method · **409** the sim refused, with the spoken reason (round-1
+oracle, not enough tokens, armed scrap…) · **400** malformed body.
+
+Joining/creating rooms is ws-only for now (`{type:'join'}` on `/ws`); D4 adds
+the agent join flow + MCP surface on top of this API.
+
 ## The shape
 
 - `shared/sim/` — the pure deterministic sim: DSL, oracle, gremlin/market
   schedules, scoring. No `Date.now()`, no `Math.random()` — all randomness is a
   seeded hash of `(seed, tick, salt)`.
+- `shared/apprentice.ts` — the apprentice's pure half: prompt, defensive
+  JSON parsing (fences tolerated), seeded flaw injection, practice generator.
 - `server/` — room registry (PIN join codes), authoritative sim per room,
   two-token seats: a **worker token** (AI: read/draft) and a **hinge token**
   (human: arm). `arm` is rejected server-side without the hinge token.
+  `server/apprentice.ts` is the LLM I/O (env config + the chat call).
 - `src/` — Svelte 5 client: JOIN page (your hand, oracle/arm buttons) and
   BOARD page (public world state + scoreboard).
 

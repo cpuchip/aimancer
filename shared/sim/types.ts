@@ -132,6 +132,14 @@ export interface RevealDelta {
 
 // ── The world ────────────────────────────────────────────────────────────────
 
+/** An apprentice draft request in flight: paid up front (draftRequested), open
+ * until the batch settles (draftSettled) or fails (draftFailed → refund). The
+ * LLM lives OUTSIDE the sim — pending is just the escrow receipt. */
+export interface PendingDraft {
+  reqId: string
+  tier: DraftTier
+}
+
 export interface Workshop {
   name: string
   tokens: number
@@ -142,6 +150,7 @@ export interface Workshop {
   uptime: number // armed-valid script-ticks (scored)
   waste: number // blowups + gremlin damage + dead scripts (scored against)
   scripts: ScriptSlot[]
+  pending: PendingDraft[] // apprentice requests awaiting drafts (paid, in escrow)
 }
 
 export interface SimState {
@@ -162,6 +171,8 @@ export interface SimState {
 
 export type SimEvent =
   | { t: 'drafted'; player: number; id: string; tier: DraftTier }
+  | { t: 'draftRequested'; player: number; tier: DraftTier }
+  | { t: 'draftFailed'; player: number; tier: DraftTier; refund: number }
   | { t: 'oracle'; player: number; id: string; ok: boolean }
   | { t: 'armed'; player: number; id: string; yolo: boolean }
   | { t: 'disarmed'; player: number; id: string }
@@ -179,7 +190,15 @@ export type SimEvent =
 export type DraftTier = 'cheap' | 'smart'
 
 export type Command =
-  | { t: 'draftAccepted'; player?: number; script: Script; tier: DraftTier }
+  // The async apprentice flow (D3). draftRequested debits the tier cost into
+  // escrow IMMEDIATELY; the LLM call happens OUTSIDE the sim; arriving drafts
+  // enter the log as data (draftAccepted with reqId = 0-cost, already paid);
+  // draftSettled closes a delivered request; draftFailed refunds a dead one.
+  // Replays never re-call the LLM — the log carries everything.
+  | { t: 'draftRequested'; player?: number; reqId: string; tier: DraftTier }
+  | { t: 'draftAccepted'; player?: number; script: Script; tier: DraftTier; reqId?: string }
+  | { t: 'draftSettled'; player?: number; reqId: string }
+  | { t: 'draftFailed'; player?: number; reqId: string; reason?: string }
   | { t: 'oracleCheck'; player?: number; id: string }
   | { t: 'arm'; player?: number; id: string }
   | { t: 'disarm'; player?: number; id: string }

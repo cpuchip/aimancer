@@ -38,6 +38,8 @@ const PHASE_LINES: Record<string, string> = {
 export function describeEvent(e: SimEvent, nameOf: (i: number) => string): string {
   switch (e.t) {
     case 'drafted': return `${nameOf(e.player)} accepted a ${e.tier} draft (${e.id})`
+    case 'draftRequested': return `🤖 ${nameOf(e.player)} asked the apprentice for a ${e.tier} draft…`
+    case 'draftFailed': return `🤯 ${nameOf(e.player)}'s apprentice returned gibberish — ${e.refund}⚡ refunded`
     case 'oracle': return `${nameOf(e.player)} consulted the oracle on ${e.id}: ${e.ok ? 'GREEN ✓' : 'RED ✗'}`
     case 'armed': return e.yolo ? `⚠ ${nameOf(e.player)} YOLO-ARMED ${e.id} — no oracle, no mercy!` : `${nameOf(e.player)} armed ${e.id} (verified)`
     case 'disarmed': return `${nameOf(e.player)} disarmed ${e.id}`
@@ -54,5 +56,5 @@ export function describeEvent(e: SimEvent, nameOf: (i: number) => string): strin
 
 /** The disaster theater shows these big; everything else is a footnote. */
 export function isDisaster(e: SimEvent): boolean {
-  return e.t === 'misfire' || e.t === 'blowup' || e.t === 'corrupted' || e.t === 'gremlinSpike'
+  return e.t === 'misfire' || e.t === 'blowup' || e.t === 'corrupted' || e.t === 'gremlinSpike' || e.t === 'draftFailed'
 }
