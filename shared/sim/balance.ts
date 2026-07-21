@@ -8,6 +8,12 @@ export const TOKEN_CAP = 50 // regen and sales both cap here (overflow is wasted
 export const DRAFT_COST_CHEAP = 3 // cheap-model draft: few tokens, shakier scripts
 export const DRAFT_COST_SMART = 8 // smart-model draft: pricier, better hit-rate
 export const ORACLE_COST = 4 // one oracle verification
+export const SCRAP_COST = 0 // scrapping is hygiene — the dead script already cost you
+
+// ── Practice apprentice (the D1 stub; D3 replaces it with the hosted one) ────
+// Chance (per 100) that a requested draft comes back subtly hallucinated.
+export const PRACTICE_FLAW_CHEAP_PCT = 45
+export const PRACTICE_FLAW_SMART_PCT = 15
 
 // ── Hand / script queue ──────────────────────────────────────────────────────
 export const MAX_SCRIPTS = 8 // total scripts a workshop can hold (hand + armed + dead)
@@ -47,7 +53,9 @@ export const SPIKE_BUGGY_EXTRA = 3 // extra damage per buggy (invalid) armed scr
 export const CORRUPT_THRESHOLD = 4 // damage (after patch) that chews a script
 export const DEAD_SCRIPT_WASTE = 5 // scored waste when a script misfires dead
 
-// ── Scoring: widgets shipped + uptime − waste ────────────────────────────────
-export const SCORE_PER_WIDGET = 10
+// ── Scoring: widgets SOLD + uptime − waste ───────────────────────────────────
+// Sold, not produced: shipping IS selling, which makes the market load-bearing
+// (a warehouse of unsold widgets scores nothing). Ratified D2.
+export const SCORE_PER_WIDGET = 10 // per widget SOLD
 export const SCORE_PER_UPTIME = 1 // per armed-valid script per tick
 export const SCORE_WASTE_MULT = 2

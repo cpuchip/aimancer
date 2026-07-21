@@ -18,6 +18,7 @@ import {
   SCORE_PER_UPTIME,
   SCORE_PER_WIDGET,
   SCORE_WASTE_MULT,
+  SCRAP_COST,
   SPIKE_BUGGY_EXTRA,
   TOKEN_CAP,
   TOKEN_REGEN,
@@ -28,24 +29,50 @@ import { hashNoise, saltOf, SALT_CORRUPT_FLAW, SALT_CORRUPT_PICK } from './noise
 import { staticCheck } from './oracle.ts'
 import { condPasses, pressureAt, runVerb, spikeAt, stepMarket } from './world.ts'
 import { mulberry32 } from '../rng.ts'
-import type { Command, DraftTier, Script, ScriptSlot, SimState, Verdict, Workshop } from './types.ts'
+import { PHASE_NEXT } from './types.ts'
+import type {
+  Command,
+  DraftTier,
+  PhaseTicks,
+  PlayerRoundStats,
+  RevealDelta,
+  RoundSummary,
+  Script,
+  ScriptSlot,
+  SimEvent,
+  SimState,
+  Verdict,
+  Workshop,
+} from './types.ts'
 
 export class RuleError extends Error {}
 function fail(msg: string): never {
   throw new RuleError(msg)
 }
 
+/** Every event goes through here so eventSeq (the feed's dedup watermark)
+ * can never drift from the array. */
+function emit(s: SimState, e: SimEvent): void {
+  s.events.push(e)
+  s.eventSeq++
+}
+
 // ── Game construction ────────────────────────────────────────────────────────
 
-export function newGame(seed = 1, numPlayers = 1, names: string[] = []): SimState {
+export function newGame(seed = 1, numPlayers = 1, names: string[] = [], phaseTicks?: Partial<PhaseTicks>): SimState {
   const n = Math.max(1, numPlayers)
   return {
     seed,
     tick: 0,
+    phase: 'round1',
+    phaseTicks: { round1: phaseTicks?.round1 ?? 0, round2: phaseTicks?.round2 ?? 0 },
     market: MARKET_BASE,
     gremlin: 0,
     players: Array.from({ length: n }, (_, i) => newWorkshop(names[i] ?? `Player ${i + 1}`)),
     events: [],
+    eventSeq: 0,
+    round1Summary: null,
+    round2Summary: null,
   }
 }
 
@@ -55,10 +82,102 @@ function newWorkshop(name: string): Workshop {
     tokens: TOKEN_START,
     matter: 0,
     widgets: 0,
-    widgetsShipped: 0,
+    widgetsSold: 0,
+    disasters: 0,
     uptime: 0,
     waste: 0,
     scripts: [],
+  }
+}
+
+// ── Phases ───────────────────────────────────────────────────────────────────
+
+/** Do world ticks run right now? False in intermission/reveal (frozen) and
+ * when the current round's tick budget is spent (waiting on the host). */
+export function ticksRunning(s: SimState): boolean {
+  if (s.phase !== 'round1' && s.phase !== 'round2') return false
+  const budget = s.phaseTicks[s.phase]
+  return budget <= 0 || s.tick < budget
+}
+
+/** Countdown for the board. null = unlimited round; 0 = frozen/spent. */
+export function ticksRemaining(s: SimState): number | null {
+  if (s.phase !== 'round1' && s.phase !== 'round2') return 0
+  const budget = s.phaseTicks[s.phase]
+  if (budget <= 0) return null
+  return Math.max(0, budget - s.tick)
+}
+
+function summarize(s: SimState): RoundSummary {
+  const players: PlayerRoundStats[] = s.players.map((w) => ({
+    name: w.name,
+    score: score(w),
+    widgetsSold: w.widgetsSold,
+    disasters: w.disasters,
+    waste: w.waste,
+    uptime: w.uptime,
+  }))
+  const totals = players.reduce(
+    (acc, p) => ({
+      score: acc.score + p.score,
+      widgetsSold: acc.widgetsSold + p.widgetsSold,
+      disasters: acc.disasters + p.disasters,
+      waste: acc.waste + p.waste,
+    }),
+    { score: 0, widgetsSold: 0, disasters: 0, waste: 0 },
+  )
+  return { atTick: s.tick, players, totals }
+}
+
+/** Round 2's level playing field: fresh world, SAME seed (schedules are
+ * f(seed, tick), and tick resets — so round 2 replays round 1's market and
+ * gremlin schedule exactly). Players keep their names and their un-played
+ * drafts (the hand they stocked during intermission); everything else resets. */
+function reseedRound2(s: SimState): void {
+  s.tick = 0
+  s.market = MARKET_BASE
+  s.gremlin = 0
+  for (const w of s.players) {
+    w.tokens = TOKEN_START
+    w.matter = 0
+    w.widgets = 0
+    w.widgetsSold = 0
+    w.disasters = 0
+    w.uptime = 0
+    w.waste = 0
+    w.scripts = w.scripts
+      .filter((sl) => sl.status === 'drafted')
+      .map((sl) => ({ script: sl.script, armed: false, everGreen: false, yolo: false, status: 'drafted' as const, lastVerdict: null }))
+  }
+}
+
+/** The reveal's headline: round 2 minus round 1, per player and for the room. */
+export function computeDelta(s: SimState): RevealDelta | null {
+  const r1 = s.round1Summary
+  const r2 = s.round2Summary
+  if (!r1 || !r2) return null
+  const players = r1.players.map((p1, i) => {
+    const p2 = r2.players[i]
+    return {
+      name: p1.name,
+      r1: p1,
+      r2: p2,
+      dScore: p2.score - p1.score,
+      dWidgetsSold: p2.widgetsSold - p1.widgetsSold,
+      dDisasters: p2.disasters - p1.disasters,
+      dWaste: p2.waste - p1.waste,
+    }
+  })
+  return {
+    players,
+    totals: {
+      score: r2.totals.score - r1.totals.score,
+      widgetsSold: r2.totals.widgetsSold - r1.totals.widgetsSold,
+      disasters: r2.totals.disasters - r1.totals.disasters,
+      waste: r2.totals.waste - r1.totals.waste,
+      r1Score: r1.totals.score,
+      r2Score: r2.totals.score,
+    },
   }
 }
 
@@ -95,7 +214,9 @@ export function draftCost(tier: DraftTier): number {
 }
 
 export function apply(s: SimState, cmd: Command): void {
-  const p = cmd.player ?? 0
+  // the reveal is a full stop — the delta board tells the story now
+  if (s.phase === 'reveal' && cmd.t !== 'phase') fail('the game is over — the delta board tells the story now')
+  const p = 'player' in cmd ? (cmd.player ?? 0) : 0
   const w = s.players[p]
   if (!w) fail('no such player')
   switch (cmd.t) {
@@ -114,10 +235,12 @@ export function apply(s: SimState, cmd: Command): void {
         status: 'drafted',
         lastVerdict: null,
       })
-      s.events.push({ t: 'drafted', player: p, id: cmd.script.id, tier: cmd.tier })
+      emit(s, { t: 'drafted', player: p, id: cmd.script.id, tier: cmd.tier })
       return
     }
     case 'oracleCheck': {
+      // ROUND 1 IS NAIVE: the oracle does not exist yet — a rule, not UI hiding.
+      if (s.phase !== 'round2') fail("the oracle hasn't been invented yet — round 2 unlocks it")
       const slot = findSlot(w, cmd.id)
       if (w.tokens < ORACLE_COST) fail(`not enough tokens (oracle costs ${ORACLE_COST})`)
       w.tokens -= ORACLE_COST
@@ -130,12 +253,15 @@ export function apply(s: SimState, cmd: Command): void {
         // the oracle is the switch — a red verdict on an armed script disarms it
         slot.armed = false
         slot.status = 'autoDisarmed'
-        s.events.push({ t: 'autoDisarm', player: p, id: cmd.id, reason: v.reasons[0] ?? 'oracle red' })
+        emit(s, { t: 'autoDisarm', player: p, id: cmd.id, reason: v.reasons[0] ?? 'oracle red' })
       }
-      s.events.push({ t: 'oracle', player: p, id: cmd.id, ok: v.ok })
+      emit(s, { t: 'oracle', player: p, id: cmd.id, ok: v.ok })
       return
     }
     case 'arm': {
+      // the world is frozen between rounds; an intermission arm would silently
+      // vanish in the round-2 reset — refuse it up front, in plain words
+      if (s.phase === 'intermission') fail('the world is frozen for the intermission — arming waits for round 2')
       const slot = findSlot(w, cmd.id)
       if (slot.status === 'dead') fail(`script '${cmd.id}' is dead`)
       if (slot.status === 'blown') fail(`script '${cmd.id}' blew up`)
@@ -143,7 +269,7 @@ export function apply(s: SimState, cmd: Command): void {
       slot.armed = true
       slot.status = 'armed'
       slot.yolo = !slot.everGreen // armed without an oracle pass = YOLO
-      s.events.push({ t: 'armed', player: p, id: cmd.id, yolo: slot.yolo })
+      emit(s, { t: 'armed', player: p, id: cmd.id, yolo: slot.yolo })
       return
     }
     case 'disarm': {
@@ -151,7 +277,27 @@ export function apply(s: SimState, cmd: Command): void {
       if (!slot.armed) fail(`script '${cmd.id}' is not armed`)
       slot.armed = false
       slot.status = 'disarmed'
-      s.events.push({ t: 'disarmed', player: p, id: cmd.id })
+      emit(s, { t: 'disarmed', player: p, id: cmd.id })
+      return
+    }
+    case 'scrap': {
+      const slot = findSlot(w, cmd.id)
+      if (slot.armed) fail(`script '${cmd.id}' is armed — disarm it before scrapping`)
+      if (w.tokens < SCRAP_COST) fail(`not enough tokens (scrap costs ${SCRAP_COST})`)
+      w.tokens -= SCRAP_COST
+      w.scripts = w.scripts.filter((sl) => sl !== slot)
+      emit(s, { t: 'scrapped', player: p, id: cmd.id })
+      return
+    }
+    case 'phase': {
+      const next = PHASE_NEXT[s.phase]
+      if (!next) fail('there is nothing after the reveal')
+      if (cmd.to !== next) fail(`from ${s.phase} the only advance is ${next}`)
+      if (next === 'intermission') s.round1Summary = summarize(s)
+      if (next === 'round2') reseedRound2(s)
+      if (next === 'reveal') s.round2Summary = summarize(s)
+      s.phase = next
+      emit(s, { t: 'phase', phase: next })
       return
     }
   }
@@ -164,17 +310,21 @@ function misfire(s: SimState, w: Workshop, p: number, slot: ScriptSlot, v: Verdi
   slot.status = 'dead'
   slot.lastVerdict = v
   w.waste += DEAD_SCRIPT_WASTE
-  s.events.push({ t: 'misfire', player: p, id: slot.script.id, reason: v.reasons[0] ?? 'invalid script' })
+  w.disasters++
+  emit(s, { t: 'misfire', player: p, id: slot.script.id, reason: v.reasons[0] ?? 'invalid script' })
 }
 
 export function tick(s: SimState): void {
+  // frozen phases and spent round budgets: the world holds still (no-op, so a
+  // replay may tick freely — extra ticks cannot desync it)
+  if (!ticksRunning(s)) return
   s.events = []
   s.tick++
   // world schedules
   const nextMarket = stepMarket(s.market, s.seed, s.tick)
   if (nextMarket !== s.market) {
     s.market = nextMarket
-    s.events.push({ t: 'marketShift', market: s.market })
+    emit(s, { t: 'marketShift', market: s.market })
   }
   s.gremlin = pressureAt(s.tick)
 
@@ -188,14 +338,16 @@ export function tick(s: SimState): void {
 
     // pass 1: auto-renew — every oracle-green armed script gets a FREE per-tick
     // re-oracle; a red verdict AUTO-DISARMS (the oracle is the switch, literal).
+    // ROUND 2 ONLY: in the naive round nothing can be verified, so nothing renews.
     for (const slot of w.scripts) {
+      if (s.phase !== 'round2') break
       if (!slot.armed || !slot.everGreen) continue
       const v = staticCheck(slot.script)
       slot.lastVerdict = v
       if (!v.ok) {
         slot.armed = false
         slot.status = 'autoDisarmed'
-        s.events.push({ t: 'autoDisarm', player: p, id: slot.script.id, reason: v.reasons[0] ?? 'oracle red' })
+        emit(s, { t: 'autoDisarm', player: p, id: slot.script.id, reason: v.reasons[0] ?? 'oracle red' })
       }
     }
 
@@ -218,8 +370,9 @@ export function tick(s: SimState): void {
         slot.armed = false
         slot.status = 'blown'
         w.waste += BOOST_BLOWUP_WASTE
+        w.disasters++
         w.matter = Math.max(0, w.matter - BOOST_BLOWUP_MATTER_LOSS)
-        s.events.push({ t: 'blowup', player: p, id: slot.script.id })
+        emit(s, { t: 'blowup', player: p, id: slot.script.id })
         continue
       }
       mult = Math.max(mult, m)
@@ -261,21 +414,22 @@ export function tick(s: SimState): void {
           const pick = armed[hashNoise(s.seed, s.tick, SALT_CORRUPT_PICK + p * 7919) % armed.length]
           const prng = mulberry32(hashNoise(s.seed, s.tick, SALT_CORRUPT_FLAW + p * 7919))
           pick.script = flawScript(pick.script, prng).script // same id, subtly broken
-          s.events.push({ t: 'corrupted', player: p, id: pick.script.id })
+          w.disasters++
+          emit(s, { t: 'corrupted', player: p, id: pick.script.id })
           // an oracle-green script auto-disarms on next tick's re-oracle
           // (protected); a YOLO script misfires (suffers publicly).
         }
       }
     }
-    s.events.push({ t: 'gremlinSpike', pressure: s.gremlin, damage })
+    emit(s, { t: 'gremlinSpike', pressure: s.gremlin, damage })
   }
 }
 
 // ── Scoring ──────────────────────────────────────────────────────────────────
 
-/** widgets shipped + uptime − waste, weights in balance.ts. */
+/** widgets SOLD + uptime − waste, weights in balance.ts. */
 export function score(w: Workshop): number {
-  return w.widgetsShipped * SCORE_PER_WIDGET + w.uptime * SCORE_PER_UPTIME - w.waste * SCORE_WASTE_MULT
+  return w.widgetsSold * SCORE_PER_WIDGET + w.uptime * SCORE_PER_UPTIME - w.waste * SCORE_WASTE_MULT
 }
 
 // ── Replay identity helpers ──────────────────────────────────────────────────
@@ -285,9 +439,13 @@ export function snap(s: SimState): string {
   return JSON.stringify({
     seed: s.seed,
     tick: s.tick,
+    phase: s.phase,
+    phaseTicks: s.phaseTicks,
     market: s.market,
     gremlin: s.gremlin,
     players: s.players,
+    round1Summary: s.round1Summary,
+    round2Summary: s.round2Summary,
   })
 }
 

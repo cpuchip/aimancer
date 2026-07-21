@@ -10,6 +10,13 @@ export const TICK_MS_DEFAULT = 25_000
 export const TICK_MS_MIN = 250 // fast enough for wstest, still a real interval
 export const TICK_MS_MAX = 60_000
 
+/** Per-round tick budgets (the 40-minute weave: round 1 "Naive" ~12 ticks,
+ * round 2 "Verified" ~19). Host can override at start; dev-fast stays possible. */
+export const ROUND1_TICKS_DEFAULT = 12
+export const ROUND2_TICKS_DEFAULT = 19
+export const ROUND_TICKS_MIN = 1
+export const ROUND_TICKS_MAX = 999
+
 /** PIN alphabet — no I/O, read-aloud friendly (chips' CODE_ALPHABET). */
 export const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
 export const CODE_LENGTH = 4

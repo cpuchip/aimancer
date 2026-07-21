@@ -75,7 +75,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   // /api/room/:pin/:action
-  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/(state|draft|arm)$/)
+  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/(state|draft|arm|log)$/)
   if (!m) {
     sendJson(res, 404, { ok: false, error: 'unknown api route' })
     return
@@ -93,6 +93,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'GET only' })
     // redacted per token: a seat token sees its own hand; no token = public view
     sendJson(res, 200, { ok: true, view: room.viewFor(who ? who.seat : null) })
+    return
+  }
+
+  if (action === 'log') {
+    // the command log + seed (replay theater's feed) — per-token redaction
+    // lives in Room.logView (other seats' draft bodies stripped; host token
+    // gets the full log after the reveal only)
+    if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'GET only' })
+    sendJson(res, 200, { ok: true, ...room.logView(token) })
     return
   }
 

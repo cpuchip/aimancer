@@ -26,11 +26,12 @@ import {
   TOKEN_REGEN,
   TOKEN_START,
 } from './balance.ts'
+import { freshEvents, newFeedCursor } from '../eventFeed.ts'
 import { FLAW_CLASSES, flawScript, sampleScript } from './flaws.ts'
 import { oracle, staticCheck } from './oracle.ts'
-import { apply, newGame, RuleError, score, snap, stateHash, tick, validateShape } from './sim.ts'
+import { apply, computeDelta, newGame, RuleError, score, snap, stateHash, tick, ticksRemaining, ticksRunning, validateShape } from './sim.ts'
 import { pressureAt, stepMarket } from './world.ts'
-import { VERBS, type Command, type Script, type SimEvent, type SimState } from './types.ts'
+import { VERBS, type Command, type PhaseTicks, type Script, type SimEvent, type SimState } from './types.ts'
 
 let passed = 0
 let failed = 0
@@ -63,8 +64,8 @@ function throws(fn: () => void, name: string): void {
  * Mirrors the server: a RuleError'd command is rejected and skipped (rejection
  * is itself deterministic, so replay identity still holds). Collects every
  * event emitted along the way. */
-function play(seed: number, log: Array<Command | 'tick'>, players = 1): { s: SimState; events: SimEvent[] } {
-  const s = newGame(seed, players)
+function play(seed: number, log: Array<Command | 'tick'>, players = 1, phaseTicks?: Partial<PhaseTicks>): { s: SimState; events: SimEvent[] } {
+  const s = newGame(seed, players, [], phaseTicks)
   const events: SimEvent[] = []
   for (const entry of log) {
     if (entry === 'tick') tick(s)
@@ -81,37 +82,66 @@ function play(seed: number, log: Array<Command | 'tick'>, players = 1): { s: Sim
   return { s, events }
 }
 
+/** A game advanced straight to round 2 — the full-rules phase (oracle live,
+ * auto-renew live). The reseed makes it byte-identical to a fresh world, so
+ * every assertion that held on a D1 fresh game holds here unchanged. */
+function newGameR2(seed = 1, numPlayers = 1, names: string[] = []): SimState {
+  const s = newGame(seed, numPlayers, names)
+  apply(s, { t: 'phase', to: 'intermission' })
+  apply(s, { t: 'phase', to: 'round2' })
+  s.events = [] // drop the transition events — tests start clean
+  return s
+}
+
 const H = (rate = 1): Script => ({ id: 'h1', verb: 'harvest', params: { rate } })
 
 // ── 1. Replay identity: seed + command log → identical state hash ────────────
-console.log('replay identity')
+// The log CROSSES ALL FOUR PHASES (phase advances are commands, so a replay
+// carries the whole 40-minute weave — D2's replay-determinism requirement).
+console.log('replay identity (across phases)')
 {
   const log: Array<Command | 'tick'> = [
+    // round 1 — naive: YOLO arms only, oracle attempts are refused (and the
+    // refusal is itself deterministic — this one stays in the log on purpose)
     { t: 'draftAccepted', script: H(2), tier: 'cheap' },
+    { t: 'oracleCheck', id: 'h1' }, // REFUSED in round1 — deterministic no-op
+    { t: 'arm', id: 'h1' }, // YOLO
+    'tick', 'tick', 'tick',
+    { t: 'draftAccepted', script: { id: 'bad', verb: 'harvst', params: { rate: 2 } }, tier: 'cheap' },
+    { t: 'arm', id: 'bad' }, // YOLO a hallucination — it will die
+    ...Array(9).fill('tick') as 'tick'[],
+    // intermission — frozen; stock the hand
+    { t: 'phase', to: 'intermission' },
+    'tick', 'tick', // no-ops (frozen)
+    { t: 'draftAccepted', script: { id: 'r1', verb: 'refine', params: { rate: 1 } }, tier: 'smart' },
+    { t: 'scrap', id: 'bad' }, // clear the corpse
+    // round 2 — verified: fresh world, oracle live
+    { t: 'phase', to: 'round2' },
+    { t: 'oracleCheck', id: 'r1' },
+    { t: 'arm', id: 'r1' },
+    { t: 'draftAccepted', script: H(3), tier: 'cheap' },
     { t: 'oracleCheck', id: 'h1' },
     { t: 'arm', id: 'h1' },
-    'tick', 'tick', 'tick',
-    { t: 'draftAccepted', script: { id: 'r1', verb: 'refine', params: { rate: 1 } }, tier: 'smart' },
-    { t: 'arm', id: 'r1' }, // YOLO
-    ...Array(20).fill('tick') as 'tick'[],
-    { t: 'draftAccepted', script: { id: 'bad', verb: 'harvst', params: { rate: 2 } }, tier: 'cheap' },
-    { t: 'arm', id: 'bad' }, // YOLO a hallucination
-    ...Array(20).fill('tick') as 'tick'[],
+    ...Array(19).fill('tick') as 'tick'[],
     { t: 'disarm', id: 'h1' },
-    ...Array(10).fill('tick') as 'tick'[],
+    'tick', 'tick',
+    { t: 'phase', to: 'reveal' },
+    'tick', // no-op (game over)
   ]
-  const a = play(77, log)
-  const b = play(77, log)
-  ok(snap(a.s) === snap(b.s), 'identical seed+commands → identical state')
+  const cfg = { round1: 12, round2: 19 }
+  const a = play(77, log, 1, cfg)
+  const b = play(77, log, 1, cfg)
+  ok(snap(a.s) === snap(b.s), 'identical seed+commands → identical state ACROSS ALL FOUR PHASES')
   ok(stateHash(a.s) === stateHash(b.s), `replay hash proof: ${stateHash(a.s)} == ${stateHash(b.s)}`)
-  const c = play(78, log)
+  ok(a.s.phase === 'reveal' && a.s.round1Summary !== null && a.s.round2Summary !== null, 'the replay lands in reveal with both summaries captured')
+  const c = play(78, log, 1, cfg)
   ok(stateHash(c.s) !== stateHash(a.s), `different seed → different hash (${stateHash(c.s)})`)
 }
 
 // ── 2. Token economy: regen, cap, draft/oracle costs ─────────────────────────
 console.log('token economy')
 {
-  const s = newGame(5)
+  const s = newGameR2(5)
   ok(s.players[0].tokens === TOKEN_START, `workshop opens with ${TOKEN_START} tokens`)
   tick(s)
   ok(s.players[0].tokens === TOKEN_START + TOKEN_REGEN, 'tokens regen per tick like a rate limit')
@@ -125,7 +155,7 @@ console.log('token economy')
   apply(s, { t: 'oracleCheck', id: 'h1' })
   ok(s.players[0].tokens === before - ORACLE_COST, `an oracle check costs ${ORACLE_COST}`)
 
-  const poor = newGame(5)
+  const poor = newGameR2(5)
   poor.players[0].tokens = 2
   throws(() => apply(poor, { t: 'draftAccepted', script: H(), tier: 'cheap' }), 'cannot draft without tokens')
   poor.players[0].tokens = 3
@@ -159,7 +189,7 @@ console.log('structural gate')
 console.log('verbs')
 {
   // harvest
-  const s = newGame(9)
+  const s = newGameR2(9)
   apply(s, { t: 'draftAccepted', script: H(3), tier: 'cheap' })
   apply(s, { t: 'oracleCheck', id: 'h1' })
   apply(s, { t: 'arm', id: 'h1' })
@@ -167,17 +197,17 @@ console.log('verbs')
   ok(s.players[0].matter === 3, 'harvest gains matter at its rate')
 
   // refine (ratio) — seed the matter directly
-  const s2 = newGame(9)
+  const s2 = newGameR2(9)
   s2.players[0].matter = 10
   apply(s2, { t: 'draftAccepted', script: { id: 'r1', verb: 'refine', params: { rate: 2 } }, tier: 'cheap' })
   apply(s2, { t: 'oracleCheck', id: 'r1' })
   apply(s2, { t: 'arm', id: 'r1' })
   tick(s2)
   ok(s2.players[0].widgets === 2 && s2.players[0].matter === 10 - 2 * REFINE_RATIO, `refine converts ${REFINE_RATIO} matter per widget`)
-  ok(s2.players[0].widgetsShipped === 2, 'refined widgets count as shipped')
+  ok(s2.players[0].widgetsSold === 0, 'refined widgets are INVENTORY, not score — selling is what ships')
 
   // sell (at the market rate)
-  const s3b = newGame(9)
+  const s3b = newGameR2(9)
   s3b.players[0].widgets = 4
   apply(s3b, { t: 'draftAccepted', script: { id: 'sl', verb: 'sell', params: { amount: 3 } }, tier: 'cheap' })
   apply(s3b, { t: 'oracleCheck', id: 'sl' })
@@ -188,6 +218,7 @@ console.log('verbs')
   const expected = Math.min(TOKEN_CAP, tokensBefore + TOKEN_REGEN + 3 * s3b.market)
   ok(s3b.players[0].widgets === 1, 'sell moves widgets out of inventory')
   ok(s3b.players[0].tokens === expected, `sell pays amount × market rate (rate ${marketBefore}→${s3b.market})`)
+  ok(s3b.players[0].widgetsSold === 3, 'sold widgets are the scored count (shipping IS selling)')
 
   // patch + boost are proven in sections 6 and 7
 }
@@ -220,7 +251,7 @@ console.log('gremlin')
 
   // same seed, two games: one patched, one not — the unpatched one suffers more
   function runShop(patched: boolean): number {
-    const s = newGame(1234)
+    const s = newGameR2(1234)
     apply(s, { t: 'draftAccepted', script: H(1), tier: 'cheap' })
     apply(s, { t: 'oracleCheck', id: 'h1' })
     apply(s, { t: 'arm', id: 'h1' })
@@ -241,7 +272,7 @@ console.log('gremlin')
   // one. Deterministic seed search: find a world whose first 31 ticks contain a
   // spike (31 keeps pressure < 4, so the verified twin can't be corrupted).
   function runYolo(seed: number, verified: boolean): number {
-    const s = newGame(seed)
+    const s = newGameR2(seed)
     apply(s, { t: 'draftAccepted', script: H(1), tier: 'cheap' })
     if (verified) apply(s, { t: 'oracleCheck', id: 'h1' })
     apply(s, { t: 'arm', id: 'h1' })
@@ -264,7 +295,7 @@ console.log('boost')
   // find a seed whose first tick doesn't blow the boost — then output is ×mult
   let proven = false
   for (let seed = 1; seed < 60 && !proven; seed++) {
-    const s = newGame(seed)
+    const s = newGameR2(seed)
     apply(s, { t: 'draftAccepted', script: H(2), tier: 'cheap' })
     apply(s, { t: 'oracleCheck', id: 'h1' })
     apply(s, { t: 'arm', id: 'h1' })
@@ -282,7 +313,7 @@ console.log('boost')
   // run long enough and the risk WILL land: blowup event, waste, blown status
   let blew = false
   outer: for (let seed = 1; seed < 20; seed++) {
-    const s = newGame(seed)
+    const s = newGameR2(seed)
     apply(s, { t: 'draftAccepted', script: { id: 'b1', verb: 'boost', params: { mult: 4 } }, tier: 'cheap' })
     apply(s, { t: 'oracleCheck', id: 'b1' })
     apply(s, { t: 'arm', id: 'b1' })
@@ -369,7 +400,7 @@ console.log('oracle dry-run')
 console.log('lifecycle + the oracle is the switch')
 {
   // draftAccepted enters the queue unarmed
-  const s = newGame(11)
+  const s = newGameR2(11)
   apply(s, { t: 'draftAccepted', script: H(1), tier: 'cheap' })
   const slot = s.players[0].scripts[0]
   ok(!slot.armed && slot.status === 'drafted', 'a draft enters the hand unarmed')
@@ -385,19 +416,20 @@ console.log('lifecycle + the oracle is the switch')
   apply(s, { t: 'arm', id: 'h1' })
   ok(slot.armed && !slot.yolo && slot.everGreen, 'oracle-green arm is a verified arm')
 
-  // MUST-FAIL: a YOLO'd hallucination MUST misfire, die, and cost waste
+  // MUST-FAIL: a YOLO'd hallucination MUST misfire, die, and cost waste.
+  // Run in ROUND 1 on purpose: naive-round chaos is the show's first act.
   const y = newGame(11)
   apply(y, { t: 'draftAccepted', script: { id: 'lie', verb: 'harvest', params: { rte: 3 } }, tier: 'cheap' })
   apply(y, { t: 'arm', id: 'lie' }) // no oracle — free, risky
   tick(y)
   const dead = y.players[0].scripts[0]
-  ok(dead.status === 'dead' && !dead.armed, 'INVERSE: a YOLO hallucination MUST die at runtime')
+  ok(dead.status === 'dead' && !dead.armed, 'INVERSE: a YOLO hallucination MUST die at runtime (round 1 chaos included)')
   ok(y.players[0].waste >= DEAD_SCRIPT_WASTE, 'the misfire costs waste')
   ok(y.events.some((e) => e.t === 'misfire'), 'the misfire is a public event (comedy delivered)')
   throws(() => apply(y, { t: 'arm', id: 'lie' }), 'a dead script cannot be re-armed')
 
   // the SAME hallucination, oracle-checked while armed → auto-disarm, no death
-  const g = newGame(11)
+  const g = newGameR2(11)
   apply(g, { t: 'draftAccepted', script: { id: 'lie', verb: 'harvest', params: { rte: 3 } }, tier: 'cheap' })
   apply(g, { t: 'arm', id: 'lie' })
   apply(g, { t: 'oracleCheck', id: 'lie' })
@@ -406,7 +438,7 @@ console.log('lifecycle + the oracle is the switch')
   ok(saved.status !== 'dead', 'verified-in-time beats dead')
 
   // auto-renew: an oracle-green armed script stays armed tick after tick
-  const a = newGame(11)
+  const a = newGameR2(11)
   apply(a, { t: 'draftAccepted', script: H(1), tier: 'cheap' })
   apply(a, { t: 'oracleCheck', id: 'h1' })
   apply(a, { t: 'arm', id: 'h1' })
@@ -419,7 +451,7 @@ console.log('lifecycle + the oracle is the switch')
 console.log('corruption: protected vs YOLO')
 {
   // Two players, same world: p0 verifies, p1 YOLOs the same script shape.
-  const s = newGame(4242, 2)
+  const s = newGameR2(4242, 2)
   apply(s, { t: 'draftAccepted', player: 0, script: H(1), tier: 'cheap' })
   apply(s, { t: 'oracleCheck', player: 0, id: 'h1' })
   apply(s, { t: 'arm', player: 0, id: 'h1' })
@@ -450,7 +482,7 @@ console.log('corruption: protected vs YOLO')
 // ── 12. Conditions gate execution ────────────────────────────────────────────
 console.log('conditions')
 {
-  const s = newGame(13)
+  const s = newGameR2(13)
   apply(s, { t: 'draftAccepted', script: { id: 'h1', verb: 'harvest', params: { rate: 2 }, when: { field: 'tick', op: '>', value: 4 } }, tier: 'cheap' })
   apply(s, { t: 'oracleCheck', id: 'h1' })
   apply(s, { t: 'arm', id: 'h1' })
@@ -460,21 +492,32 @@ console.log('conditions')
   ok(s.players[0].matter === 2, 'and fires the tick the condition turns true')
 }
 
-// ── 13. Scoring: widgets shipped + uptime − waste ────────────────────────────
-console.log('scoring')
+// ── 13. Scoring: widgets SOLD + uptime − waste ───────────────────────────────
+console.log('scoring (sold, not produced)')
 {
   const s = newGame(1)
   const w = s.players[0]
-  w.widgetsShipped = 3
+  w.widgetsSold = 3
   w.uptime = 7
   w.waste = 2
-  ok(score(w) === 3 * SCORE_PER_WIDGET + 7 * SCORE_PER_UPTIME - 2 * SCORE_WASTE_MULT, 'score formula holds')
+  ok(score(w) === 3 * SCORE_PER_WIDGET + 7 * SCORE_PER_UPTIME - 2 * SCORE_WASTE_MULT, 'score formula holds (per widget SOLD)')
 
-  // a working workshop outscores an idle one over the same world
+  // producing without selling scores only uptime — the market is load-bearing
+  const hoard = newGameR2(31337)
+  hoard.players[0].matter = 30
+  apply(hoard, { t: 'draftAccepted', script: { id: 'r1', verb: 'refine', params: { rate: 2 } }, tier: 'cheap' })
+  apply(hoard, { t: 'oracleCheck', id: 'r1' })
+  apply(hoard, { t: 'arm', id: 'r1' })
+  for (let i = 0; i < 5; i++) tick(hoard)
+  const hw = hoard.players[0]
+  ok(hw.widgets > 0 && hw.widgetsSold === 0, `a warehouse full of unsold widgets (${hw.widgets}) has sold nothing`)
+  ok(score(hw) === hw.uptime * SCORE_PER_UPTIME - hw.waste * SCORE_WASTE_MULT, 'unsold widgets contribute ZERO score')
+
+  // a working workshop (that SELLS) outscores an idle one over the same world
   function run(withScripts: boolean): number {
-    const g = newGame(31337)
+    const g = newGameR2(31337)
     // TOKEN_START affords 2 verified drafts, not 3 (a real balance datum) —
-    // fund this workshop so the test exercises three verbs at once.
+    // fund this workshop so the test exercises four verbs at once.
     g.players[0].tokens = TOKEN_CAP
     if (withScripts) {
       apply(g, { t: 'draftAccepted', script: H(3), tier: 'cheap' })
@@ -483,6 +526,9 @@ console.log('scoring')
       apply(g, { t: 'draftAccepted', script: { id: 'r1', verb: 'refine', params: { rate: 1 } }, tier: 'cheap' })
       apply(g, { t: 'oracleCheck', id: 'r1' })
       apply(g, { t: 'arm', id: 'r1' })
+      apply(g, { t: 'draftAccepted', script: { id: 'sl', verb: 'sell', params: { amount: 2 } }, tier: 'cheap' })
+      apply(g, { t: 'oracleCheck', id: 'sl' })
+      apply(g, { t: 'arm', id: 'sl' })
       apply(g, { t: 'draftAccepted', script: { id: 'p1', verb: 'patch', params: { strength: 4 } }, tier: 'cheap' })
       apply(g, { t: 'oracleCheck', id: 'p1' })
       apply(g, { t: 'arm', id: 'p1' })
@@ -499,13 +545,197 @@ console.log('scoring')
 // ── 14. Events feed the board ────────────────────────────────────────────────
 console.log('events')
 {
-  const s = newGame(2)
+  const s = newGameR2(2)
   apply(s, { t: 'draftAccepted', script: H(1), tier: 'smart' })
   ok(s.events.some((e) => e.t === 'drafted' && e.tier === 'smart'), 'drafted event carries its tier')
   apply(s, { t: 'oracleCheck', id: 'h1' })
   ok(s.events.some((e) => e.t === 'oracle' && e.ok), 'oracle verdicts are public events')
   apply(s, { t: 'arm', id: 'h1' })
   ok(s.events.some((e) => e.t === 'armed' && e.yolo === false), 'armed event says whether it was YOLO')
+}
+
+// ── 15. THE PHASE MACHINE (D2): the 40-minute weave, in the sim ──────────────
+console.log('phase machine')
+{
+  const s = newGame(21, 2, ['Ada', 'Bob'], { round1: 5, round2: 7 })
+  ok(s.phase === 'round1', 'a new game opens in round 1 (the room lobby is pre-sim)')
+  ok(ticksRemaining(s) === 5, 'round-1 countdown reads the budget')
+
+  // ROUND 1 IS NAIVE: the oracle is refused BY THE SIM — a rule, not UI hiding
+  apply(s, { t: 'draftAccepted', player: 0, script: H(2), tier: 'cheap' })
+  try {
+    apply(s, { t: 'oracleCheck', player: 0, id: 'h1' })
+    ok(false, 'oracle in round 1 must be refused')
+  } catch (e) {
+    ok(e instanceof RuleError && e.message.includes("hasn't been invented"), `oracle refused in round 1, in plain words ("${e instanceof Error ? e.message : e}")`)
+  }
+  apply(s, { t: 'arm', player: 0, id: 'h1' }) // YOLO is the only arm in round 1
+  ok(s.players[0].scripts[0].yolo, 'every round-1 arm is a YOLO arm')
+
+  // the tick budget freezes the world when spent
+  for (let i = 0; i < 9; i++) tick(s)
+  ok(s.tick === 5, `round 1 stops at its budget (tick ${s.tick} of 5) — extra ticks no-op`)
+  ok(ticksRemaining(s) === 0 && !ticksRunning(s), 'spent budget: 0 remaining, world holds for the host')
+
+  // only the lawful advance works
+  throws(() => apply(s, { t: 'phase', to: 'round2' }), 'cannot skip intermission')
+  throws(() => apply(s, { t: 'phase', to: 'reveal' }), 'cannot jump to reveal')
+  apply(s, { t: 'phase', to: 'intermission' })
+  ok(s.phase === 'intermission', 'host advances round1 → intermission')
+  ok(s.round1Summary !== null && s.round1Summary.atTick === 5, 'round-1 summary captured at the freeze')
+  ok(s.events.some((e) => e.t === 'phase' && e.phase === 'intermission'), 'the advance is a public event')
+
+  // intermission: frozen world, drafts allowed, arms refused, oracle still absent
+  const hashBefore = stateHash(s)
+  tick(s)
+  tick(s)
+  ok(stateHash(s) === hashBefore, 'intermission ticks are no-ops (world frozen)')
+  apply(s, { t: 'draftAccepted', player: 0, script: { id: 'r1', verb: 'refine', params: { rate: 1 } }, tier: 'smart' })
+  ok(s.players[0].scripts.some((sl) => sl.script.id === 'r1'), 'drafting during intermission stocks the hand')
+  throws(() => apply(s, { t: 'arm', player: 0, id: 'r1' }), 'arming is refused while the world is frozen')
+  throws(() => apply(s, { t: 'oracleCheck', player: 0, id: 'r1' }), 'the oracle stays uninvented until round 2')
+
+  // round 2: fresh world, same seed; names + stocked drafts carry, nothing else
+  apply(s, { t: 'phase', to: 'round2' })
+  ok(s.phase === 'round2' && s.tick === 0, 'round 2 restarts the clock')
+  ok(s.players[0].tokens === TOKEN_START && s.players[0].matter === 0 && s.players[0].waste === 0, 'resources reset to opening values')
+  ok(s.players[0].name === 'Ada' && s.players[1].name === 'Bob', 'names carry')
+  ok(s.players[0].scripts.length === 1 && s.players[0].scripts[0].script.id === 'r1', 'ONLY un-played drafts carry (the armed h1 is gone)')
+  ok(ticksRemaining(s) === 7, 'round-2 countdown reads its own budget')
+  apply(s, { t: 'oracleCheck', player: 0, id: 'r1' })
+  ok(s.players[0].scripts[0].everGreen, 'the oracle exists now')
+
+  // reveal: full stop
+  for (let i = 0; i < 7; i++) tick(s)
+  apply(s, { t: 'phase', to: 'reveal' })
+  ok(s.round2Summary !== null && s.round2Summary.atTick === 7, 'round-2 summary captured at the reveal')
+  const frozen = stateHash(s)
+  tick(s)
+  ok(stateHash(s) === frozen, 'reveal ticks are no-ops')
+  throws(() => apply(s, { t: 'draftAccepted', player: 0, script: H(1), tier: 'cheap' }), 'no drafting after the reveal')
+  throws(() => apply(s, { t: 'phase', to: 'round1' }), 'nothing comes after the reveal')
+}
+
+// ── 16. Same-seed fairness: round 2 replays round 1's schedule exactly ───────
+console.log('re-seed fairness')
+{
+  // Schedule fingerprint: per-tick (market, gremlin, spike?) over K empty ticks.
+  function scheduleHash(s: SimState, ticks: number): string {
+    const path: Array<[number, number, boolean]> = []
+    for (let i = 0; i < ticks; i++) {
+      tick(s)
+      path.push([s.market, s.gremlin, s.events.some((e) => e.t === 'gremlinSpike')])
+    }
+    return JSON.stringify(path)
+  }
+  const K = 40
+  // world A: a lived-in round 1 (commands, deaths, drama), then round 2
+  const a = newGame(9001, 2, [], { round1: 6, round2: 0 })
+  apply(a, { t: 'draftAccepted', player: 0, script: H(2), tier: 'cheap' })
+  apply(a, { t: 'arm', player: 0, id: 'h1' })
+  apply(a, { t: 'draftAccepted', player: 1, script: { id: 'lie', verb: 'harvst', params: { rate: 2 } }, tier: 'cheap' })
+  apply(a, { t: 'arm', player: 1, id: 'lie' })
+  for (let i = 0; i < 6; i++) tick(a)
+  apply(a, { t: 'phase', to: 'intermission' })
+  apply(a, { t: 'phase', to: 'round2' })
+  // world B: a virgin same-seed game — the reference schedule
+  const b = newGame(9001, 2, [], { round1: 0, round2: 0 })
+  const hashA = scheduleHash(a, K)
+  const hashB = scheduleHash(b, K)
+  ok(hashA === hashB, `round 2's market+gremlin schedule == a fresh same-seed run (${K} ticks, fingerprints match)`)
+}
+
+// ── 17. Delta math: the reveal's table ───────────────────────────────────────
+console.log('delta math')
+{
+  const s = newGame(55, 2, ['Kim', 'Lee'], { round1: 3, round2: 3 })
+  // round 1: Kim YOLOs a lie (dies, waste); Lee does nothing
+  apply(s, { t: 'draftAccepted', player: 0, script: { id: 'x', verb: 'harvest', params: { rte: 1 } }, tier: 'cheap' })
+  apply(s, { t: 'arm', player: 0, id: 'x' })
+  for (let i = 0; i < 3; i++) tick(s)
+  apply(s, { t: 'phase', to: 'intermission' })
+  const r1 = s.round1Summary!
+  ok(r1.players[0].disasters === 1 && r1.players[0].score < 0, 'round 1: the YOLO death is on the books')
+  ok(computeDelta(s) === null, 'no delta before round 2 exists')
+  apply(s, { t: 'phase', to: 'round2' })
+  // round 2: Kim sells verified widgets
+  s.players[0].widgets = 6
+  apply(s, { t: 'draftAccepted', player: 0, script: { id: 'sl', verb: 'sell', params: { amount: 2 } }, tier: 'cheap' })
+  apply(s, { t: 'oracleCheck', player: 0, id: 'sl' })
+  apply(s, { t: 'arm', player: 0, id: 'sl' })
+  for (let i = 0; i < 3; i++) tick(s)
+  apply(s, { t: 'phase', to: 'reveal' })
+  const d = computeDelta(s)!
+  ok(d !== null, 'reveal computes the delta')
+  const kim = d.players[0]
+  ok(kim.dScore === kim.r2.score - kim.r1.score, 'per-player dScore is r2 − r1')
+  ok(kim.dScore > 0, `Kim improved with the oracle (Δ ${kim.dScore})`)
+  ok(kim.dDisasters === -1, 'disasters went DOWN in the verified round')
+  const t = d.totals
+  ok(t.score === t.r2Score - t.r1Score, 'aggregate delta is consistent with the round totals')
+  ok(t.score === d.players.reduce((acc, p) => acc + p.dScore, 0), 'aggregate == sum of player deltas')
+}
+
+// ── 18. Scrap: frees the slot, cannot scrap a live script ────────────────────
+console.log('scrap')
+{
+  const s = newGameR2(3)
+  apply(s, { t: 'draftAccepted', script: H(1), tier: 'cheap' })
+  apply(s, { t: 'draftAccepted', script: { id: 'lie', verb: 'harvest', params: { rte: 2 } }, tier: 'cheap' })
+  apply(s, { t: 'arm', id: 'lie' })
+  tick(s) // the lie dies
+  ok(s.players[0].scripts.length === 2, 'two slots before scrapping')
+  apply(s, { t: 'scrap', id: 'lie' })
+  ok(s.players[0].scripts.length === 1 && !s.players[0].scripts.some((sl) => sl.script.id === 'lie'), 'scrapping a dead script frees its slot')
+  ok(s.events.some((e) => e.t === 'scrapped'), 'scrap is a public event')
+  apply(s, { t: 'arm', id: 'h1' })
+  throws(() => apply(s, { t: 'scrap', id: 'h1' }), 'an ARMED script cannot be scrapped (disarm first)')
+  apply(s, { t: 'disarm', id: 'h1' })
+  apply(s, { t: 'scrap', id: 'h1' })
+  ok(s.players[0].scripts.length === 0, 'disarm-then-scrap empties the hand')
+  // the freed id is usable again — the hand really is free
+  apply(s, { t: 'draftAccepted', script: H(2), tier: 'cheap' })
+  ok(s.players[0].scripts.length === 1, 'a scrapped id can be re-drafted')
+  // a full hand of corpses can be cleared (the D1 clog, solved)
+  const full = newGameR2(6)
+  full.players[0].tokens = TOKEN_CAP
+  for (let i = 0; i < MAX_SCRIPTS; i++) apply(full, { t: 'draftAccepted', script: { id: `s${i}`, verb: 'harvest', params: { rate: 1 } }, tier: 'cheap' })
+  throws(() => apply(full, { t: 'draftAccepted', script: { id: 'no', verb: 'harvest', params: { rate: 1 } }, tier: 'cheap' }), 'hand still caps')
+  apply(full, { t: 'scrap', id: 's0' })
+  apply(full, { t: 'draftAccepted', script: { id: 'yes', verb: 'harvest', params: { rate: 1 } }, tier: 'cheap' })
+  ok(full.players[0].scripts.length === MAX_SCRIPTS, 'scrap → draft refills the hand')
+}
+
+// ── 19. Event feed dedup: eventSeq slices exactly the unseen tail ────────────
+console.log('event feed dedup')
+{
+  const s = newGameR2(8)
+  const cursor = newFeedCursor()
+  const seen: SimEvent[] = []
+  // snapshot after EVERY command/tick — the server's push-on-change pattern
+  const snapshot = () => seen.push(...freshEvents(cursor, s.events, s.eventSeq))
+  apply(s, { t: 'draftAccepted', script: H(1), tier: 'cheap' })
+  snapshot()
+  snapshot() // a second push of the SAME state (e.g. another player acted)
+  apply(s, { t: 'arm', id: 'h1' })
+  snapshot() // events array now holds [drafted, armed] — drafted must NOT repeat
+  tick(s)
+  snapshot()
+  const draftedCount = seen.filter((e) => e.t === 'drafted').length
+  const armedCount = seen.filter((e) => e.t === 'armed').length
+  ok(draftedCount === 1, `duplicate-append FIXED: 'drafted' delivered exactly once (got ${draftedCount})`)
+  ok(armedCount === 1, `'armed' delivered exactly once across overlapping snapshots`)
+  // the watermark survives the round-2 reset (eventSeq is monotonic)
+  const s2 = newGame(8, 1, [], { round1: 2, round2: 5 })
+  const c2 = newFeedCursor()
+  const seen2: SimEvent[] = []
+  const snap2 = () => seen2.push(...freshEvents(c2, s2.events, s2.eventSeq))
+  tick(s2); snap2()
+  tick(s2); snap2()
+  apply(s2, { t: 'phase', to: 'intermission' }); snap2()
+  apply(s2, { t: 'phase', to: 'round2' }); snap2(); snap2()
+  const phaseEvents = seen2.filter((e) => e.t === 'phase').length
+  ok(phaseEvents === 2, `phase events cross the reset exactly once each (got ${phaseEvents})`)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

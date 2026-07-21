@@ -86,9 +86,7 @@ export function runVerb(world: WorldView, w: Workshop, script: Script, mult: num
       const n = Math.min(script.params['rate'], Math.floor(w.matter / REFINE_RATIO))
       if (n > 0) {
         w.matter -= n * REFINE_RATIO
-        const produced = n * mult
-        w.widgets += produced
-        w.widgetsShipped += produced
+        w.widgets += n * mult // inventory only — a widget scores when it SELLS
       }
       return 0
     }
@@ -96,6 +94,7 @@ export function runVerb(world: WorldView, w: Workshop, script: Script, mult: num
       const n = Math.min(script.params['amount'], w.widgets)
       if (n > 0) {
         w.widgets -= n
+        w.widgetsSold += n // shipping IS selling — this is the scored count
         w.tokens = Math.min(TOKEN_CAP, w.tokens + n * world.market) // over the cap is wasted — it's a rate limit
       }
       return 0

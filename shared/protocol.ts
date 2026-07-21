@@ -5,7 +5,7 @@
 // only to their own seat.
 
 import type { OracleReport } from './sim/oracle.ts'
-import type { DraftTier, Script, ScriptSlot, SimEvent, SlotStatus } from './sim/types.ts'
+import type { DraftTier, Phase, RevealDelta, RoundSummary, Script, ScriptSlot, SimEvent, SimPhase, SlotStatus } from './sim/types.ts'
 
 export interface LobbyPlayer {
   index: number
@@ -30,7 +30,8 @@ export interface PlayerView {
   tokens: number
   matter: number
   widgets: number
-  widgetsShipped: number
+  widgetsSold: number
+  disasters: number
   uptime: number
   waste: number
   scripts: PublicScriptView[]
@@ -43,22 +44,44 @@ export interface RoomView {
   started: boolean
   tickMs: number
   tick: number
+  phase: Phase // 'lobby' until the host starts; then the sim's phase
+  ticksRemaining: number | null // countdown within the current round (null = unlimited)
   market: number
   gremlin: number
   events: SimEvent[]
+  eventSeq: number // total events ever — the feed's dedup watermark (eventFeed.ts)
   players: PlayerView[]
+  round1Summary: RoundSummary | null // present from intermission on (the teaching backdrop)
+  round2Summary: RoundSummary | null // present in reveal
+  delta: RevealDelta | null // present in reveal — the thesis table
   you: { index: number; hand: ScriptSlot[] } | null
 }
 
 export type ClientMessage =
   | { type: 'join'; room: string; name: string; key: string } // room '' → create a new room
   | { type: 'watch'; room: string } // spectator (the big screen)
-  | { type: 'start'; token: string; tickMs?: number } // host hinge only
+  | { type: 'start'; token: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number } // host hinge only
+  | { type: 'phase'; token: string; to: SimPhase } // host hinge only — advance the weave
   | { type: 'draft'; token: string; script: Script; tier: DraftTier } // WORKER token
   | { type: 'oracle'; token: string; id: string } // either token (verification is safe)
   | { type: 'arm'; token: string; id: string } // HINGE token ONLY
   | { type: 'disarm'; token: string; id: string } // either token (disarming is safe)
+  | { type: 'scrap'; token: string; id: string } // either token (freeing a slot is safe)
   | { type: 'ping' }
+
+/** GET /api/room/:pin/log — the command log + seed (replay theater's feed).
+ * Redaction: draft commands from OTHER seats are stripped to { id, verb }
+ * (params + condition are hand-private) — except the HOST token, which gets
+ * the full log once the phase is 'reveal'. `cmd` is typed loose because a
+ * redacted draft is not a complete Command. */
+export interface RoomLogView {
+  room: string
+  seed: number
+  phase: Phase
+  tickMs: number
+  phaseTicks: { round1: number; round2: number }
+  log: Array<{ atTick: number; cmd: Record<string, unknown> }>
+}
 
 export type ServerMessage =
   | { type: 'welcome'; index: number; room: string; isHost: boolean; you: string; workerToken: string; hingeToken: string }

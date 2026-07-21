@@ -68,6 +68,68 @@ export interface ScriptSlot {
   lastVerdict: Verdict | null
 }
 
+// ── Phases (the 40-minute weave, in the sim so replays carry it) ─────────────
+
+/** 'lobby' exists only at the room level (sim not yet created); the sim itself
+ * lives in the four SimPhases and advances ONLY via a logged `phase` command. */
+export type Phase = 'lobby' | SimPhase
+export type SimPhase = 'round1' | 'intermission' | 'round2' | 'reveal'
+
+/** The only lawful advances — strictly linear, host-controlled. */
+export const PHASE_NEXT: Record<SimPhase, SimPhase | null> = {
+  round1: 'intermission',
+  intermission: 'round2',
+  round2: 'reveal',
+  reveal: null,
+}
+
+/** Per-round tick budgets. 0 = unlimited (pure-sim tests); rooms pass the
+ * mpConfig defaults (12 / 19 — the show's timing). */
+export interface PhaseTicks {
+  round1: number
+  round2: number
+}
+
+// ── Round summaries (intermission backdrop + the reveal's delta) ─────────────
+
+export interface PlayerRoundStats {
+  name: string
+  score: number
+  widgetsSold: number
+  disasters: number // misfires + blowups + corruptions
+  waste: number
+  uptime: number
+}
+
+export interface RoundTotals {
+  score: number
+  widgetsSold: number
+  disasters: number
+  waste: number
+}
+
+export interface RoundSummary {
+  atTick: number
+  players: PlayerRoundStats[]
+  totals: RoundTotals
+}
+
+/** Round-2-minus-round-1, per player — the talk's thesis in a table. */
+export interface PlayerDelta {
+  name: string
+  r1: PlayerRoundStats
+  r2: PlayerRoundStats
+  dScore: number
+  dWidgetsSold: number
+  dDisasters: number
+  dWaste: number
+}
+
+export interface RevealDelta {
+  players: PlayerDelta[]
+  totals: RoundTotals & { r1Score: number; r2Score: number }
+}
+
 // ── The world ────────────────────────────────────────────────────────────────
 
 export interface Workshop {
@@ -75,7 +137,8 @@ export interface Workshop {
   tokens: number
   matter: number
   widgets: number // inventory (sellable)
-  widgetsShipped: number // cumulative production (scored)
+  widgetsSold: number // cumulative SOLD — the scored count (shipping IS selling)
+  disasters: number // cumulative misfires + blowups + corruptions (summary stat)
   uptime: number // armed-valid script-ticks (scored)
   waste: number // blowups + gremlin damage + dead scripts (scored against)
   scripts: ScriptSlot[]
@@ -84,10 +147,15 @@ export interface Workshop {
 export interface SimState {
   seed: number
   tick: number
+  phase: SimPhase
+  phaseTicks: PhaseTicks // per-round tick budgets (0 = unlimited)
   market: number // tokens per widget, drifts on the seeded schedule
   gremlin: number // current pressure on the shared threat track
   players: Workshop[]
   events: SimEvent[] // this tick's public happenings (cleared each tick)
+  eventSeq: number // total events EVER emitted — the feed's dedup watermark
+  round1Summary: RoundSummary | null // captured entering intermission
+  round2Summary: RoundSummary | null // captured entering reveal
 }
 
 // ── Events (the big screen's disaster theater feed) ──────────────────────────
@@ -103,6 +171,8 @@ export type SimEvent =
   | { t: 'gremlinSpike'; pressure: number; damage: number[] } // damage per player
   | { t: 'corrupted'; player: number; id: string }
   | { t: 'marketShift'; market: number }
+  | { t: 'scrapped'; player: number; id: string }
+  | { t: 'phase'; phase: SimPhase }
 
 // ── Commands (the log; sim = f(seed + commands)) ─────────────────────────────
 
@@ -113,3 +183,5 @@ export type Command =
   | { t: 'oracleCheck'; player?: number; id: string }
   | { t: 'arm'; player?: number; id: string }
   | { t: 'disarm'; player?: number; id: string }
+  | { t: 'scrap'; player?: number; id: string } // free a hand slot
+  | { t: 'phase'; to: SimPhase } // host act — logged so replays cross phases

@@ -11,10 +11,22 @@
 
 import { randomBytes } from 'node:crypto'
 import { WebSocket } from 'ws'
-import { CODE_ALPHABET, CODE_LENGTH, MAX_PLAYERS, TICK_MS_DEFAULT, TICK_MS_MAX, TICK_MS_MIN, seedFromCode } from '../shared/mpConfig.ts'
-import type { ClientMessage, LobbyPlayer, PlayerView, RoomView, ServerMessage } from '../shared/protocol.ts'
+import {
+  CODE_ALPHABET,
+  CODE_LENGTH,
+  MAX_PLAYERS,
+  ROUND1_TICKS_DEFAULT,
+  ROUND2_TICKS_DEFAULT,
+  ROUND_TICKS_MAX,
+  ROUND_TICKS_MIN,
+  TICK_MS_DEFAULT,
+  TICK_MS_MAX,
+  TICK_MS_MIN,
+  seedFromCode,
+} from '../shared/mpConfig.ts'
+import type { ClientMessage, LobbyPlayer, PlayerView, RoomLogView, RoomView, ServerMessage } from '../shared/protocol.ts'
 import { oracle } from '../shared/sim/oracle.ts'
-import { apply, newGame, RuleError, score, tick } from '../shared/sim/sim.ts'
+import { apply, computeDelta, newGame, RuleError, score, tick, ticksRemaining, ticksRunning } from '../shared/sim/sim.ts'
 import type { Command, SimState } from '../shared/sim/types.ts'
 
 function send(ws: WebSocket, msg: ServerMessage): void {
@@ -75,7 +87,18 @@ export class Room {
     switch (msg.type) {
       case 'join': return this.join(ws, msg.name, msg.key)
       case 'watch': return this.watch(ws)
-      case 'start': return this.start(ws, msg.token, msg.tickMs)
+      case 'start': return this.start(ws, msg.token, msg.tickMs, msg.round1Ticks, msg.round2Ticks)
+      case 'phase': {
+        // advancing the weave is a host act on the human surface — like start
+        const who = this.auth(msg.token)
+        if (!who) return send(ws, { type: 'error', message: 'bad token' })
+        if (who.seat !== 0) return send(ws, { type: 'error', message: 'Only the host advances the round.' })
+        if (who.role !== 'hinge') return send(ws, { type: 'error', message: 'Advancing the round is a human act — use the hinge token.' })
+        const r = this.command({ t: 'phase', to: msg.to })
+        if (!r.ok) return send(ws, { type: 'error', message: r.error })
+        this.lastTickAt = Date.now() // a fresh round gets a full tick interval
+        return
+      }
       case 'draft': {
         const who = this.auth(msg.token)
         if (!who) return send(ws, { type: 'error', message: 'bad token' })
@@ -107,6 +130,15 @@ export class Room {
         const who = this.auth(msg.token)
         if (!who) return send(ws, { type: 'error', message: 'bad token' })
         const r = this.command({ t: 'disarm', player: who.seat, id: msg.id })
+        if (!r.ok) send(ws, { type: 'error', message: r.error })
+        return
+      }
+      case 'scrap': {
+        // freeing a hand slot is safe from either surface (like disarm) — the
+        // D3 apprentice will tidy its own failures
+        const who = this.auth(msg.token)
+        if (!who) return send(ws, { type: 'error', message: 'bad token' })
+        const r = this.command({ t: 'scrap', player: who.seat, id: msg.id })
         if (!r.ok) send(ws, { type: 'error', message: r.error })
         return
       }
@@ -162,14 +194,19 @@ export class Room {
     if (this.started) send(ws, { type: 'snapshot', view: this.viewFor(null) })
   }
 
-  private start(ws: WebSocket, token: string, tickMs?: number): void {
+  private start(ws: WebSocket, token: string, tickMs?: number, round1Ticks?: number, round2Ticks?: number): void {
     const who = this.auth(token)
     if (!who) return send(ws, { type: 'error', message: 'bad token' })
     if (who.seat !== 0) return send(ws, { type: 'error', message: 'Only the host can start the game.' })
     if (who.role !== 'hinge') return send(ws, { type: 'error', message: 'Starting the game is a human act — use the hinge token.' })
     if (this.started) return
     if (tickMs !== undefined) this.tickMs = Math.max(TICK_MS_MIN, Math.min(TICK_MS_MAX, Math.floor(tickMs)))
-    this.sim = newGame(this.seed, this.seats.length, this.seats.map((s) => s.name))
+    const clampRound = (v: number | undefined, dflt: number): number =>
+      v === undefined ? dflt : Math.max(ROUND_TICKS_MIN, Math.min(ROUND_TICKS_MAX, Math.floor(v)))
+    this.sim = newGame(this.seed, this.seats.length, this.seats.map((s) => s.name), {
+      round1: clampRound(round1Ticks, ROUND1_TICKS_DEFAULT),
+      round2: clampRound(round2Ticks, ROUND2_TICKS_DEFAULT),
+    })
     this.started = true
     this.lastTickAt = Date.now()
     this.broadcastLobby()
@@ -231,7 +268,8 @@ export class Room {
           tokens: w.tokens,
           matter: w.matter,
           widgets: w.widgets,
-          widgetsShipped: w.widgetsShipped,
+          widgetsSold: w.widgetsSold,
+          disasters: w.disasters,
           uptime: w.uptime,
           waste: w.waste,
           scripts: w.scripts.map((sl) => ({
@@ -248,14 +286,52 @@ export class Room {
       started: this.started,
       tickMs: this.tickMs,
       tick: sim?.tick ?? 0,
+      phase: sim?.phase ?? 'lobby',
+      ticksRemaining: sim ? ticksRemaining(sim) : 0,
       market: sim?.market ?? 0,
       gremlin: sim?.gremlin ?? 0,
       events: sim?.events ?? [],
+      eventSeq: sim?.eventSeq ?? 0,
       players,
+      round1Summary: sim?.round1Summary ?? null,
+      round2Summary: sim?.round2Summary ?? null,
+      delta: sim && sim.phase === 'reveal' ? computeDelta(sim) : null,
       you:
         seatIndex !== null && sim && sim.players[seatIndex]
           ? { index: seatIndex, hand: sim.players[seatIndex].scripts }
           : null,
+    }
+  }
+
+  /** The command log + seed (GET /api/room/:pin/log — replay theater's feed).
+   * Redaction: a draft's params/condition are hand-private, so entries from
+   * OTHER seats are stripped to { id, verb }. The HOST token unlocks the full
+   * log once the room is in 'reveal' (the take-home artifact), never before. */
+  logView(token: string): RoomLogView {
+    const who = this.auth(token)
+    const seat = who ? who.seat : null
+    const hostFull = seat === 0 && this.sim?.phase === 'reveal'
+    const log = this.log.map(({ atTick, cmd }) => {
+      if (cmd.t === 'draftAccepted' && !hostFull && cmd.player !== seat) {
+        return {
+          atTick,
+          cmd: {
+            t: cmd.t,
+            player: cmd.player,
+            tier: cmd.tier,
+            script: { id: cmd.script.id, verb: cmd.script.verb }, // params + when REDACTED
+          } as Record<string, unknown>,
+        }
+      }
+      return { atTick, cmd: cmd as unknown as Record<string, unknown> }
+    })
+    return {
+      room: this.code,
+      seed: this.seed,
+      phase: this.sim?.phase ?? 'lobby',
+      tickMs: this.tickMs,
+      phaseTicks: this.sim?.phaseTicks ?? { round1: 0, round2: 0 },
+      log,
     }
   }
 
@@ -268,6 +344,7 @@ export class Room {
   /** Advance the sim if this room's tick is due (called by the server loop). */
   maybeTick(now: number): void {
     if (!this.started || !this.sim) return
+    if (!ticksRunning(this.sim)) return // frozen phase / spent budget — hold still
     if (now - this.lastTickAt < this.tickMs) return
     this.lastTickAt = now
     tick(this.sim)
