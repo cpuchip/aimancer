@@ -528,19 +528,27 @@ async function main(): Promise<void> {
     await dave.waitView((v) => v.started, 'dave started')
     ok(dave.view!.apprentice === 'live', "state says apprentice: 'live' (a model is wired)")
 
-    // happy path: ask (ws, worker token) → debit NOW → drafts land async, 0-cost
+    // happy path: ask (ws, worker token) → debit NOW → drafts land async, 0-cost.
+    // Snapshots arrive one PER COMMAND (accept, accept, settle) — wait for the
+    // SETTLED state (hand full AND escrow empty), not just the hand, or the
+    // asserts race the settle snapshot.
     dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'smart' })
-    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 2, 'smart drafts arrived')
+    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 2 && v.you!.pending.length === 0, 'smart drafts arrived + escrow settled')
     ok(dave.view!.players[0].tokens === TOKEN_START - DRAFT_COST_SMART, `the request debited exactly ${DRAFT_COST_SMART} — the arriving drafts were free (already paid)`)
-    ok(dave.view!.you!.pending.length === 0, 'the escrow settled once the batch landed')
+    ok(true, 'the escrow settled once the batch landed')
     const daveVerbs = dave.view!.you!.hand.map((sl) => sl.script.verb).sort()
     ok(daveVerbs.join(',') === 'harvest,sell', `the REAL model's verbs came through (${daveVerbs.join('+')}) — flaw injection never touches the verb`)
     ok(dave.view!.you!.hand.every((sl) => sl.script.id.startsWith('q1')), 'server-assigned draft ids (q1a, q1b)')
 
-    // timeout path: HANG → pending slot visible, then refund via draftFailed
+    // timeout path: HANG → pending slot visible, then refund via draftFailed.
+    // The escrow was PROVEN empty above, so pending==1 here is unambiguously
+    // the hang (and the refund is the only road back to the pre-hang balance).
     dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'cheap', order: 'HANG' })
-    await dave.waitView((v) => (v.you?.pending.length ?? 0) === 1, 'pending request visible while the model hangs')
-    ok(dave.view!.players[0].tokens === TOKEN_START - DRAFT_COST_SMART - DRAFT_COST_CHEAP, 'the debit landed the moment we asked (drafting… still in flight)')
+    await dave.waitView(
+      (v) => (v.you?.pending.length ?? 0) === 1 && v.players[0].tokens === TOKEN_START - DRAFT_COST_SMART - DRAFT_COST_CHEAP,
+      'pending request + debit visible while the model hangs',
+    )
+    ok(true, 'the debit landed the moment we asked (drafting… still in flight)')
     await dave.waitView((v) => (v.you?.pending.length ?? 0) === 0 && v.players[0].tokens === TOKEN_START - DRAFT_COST_SMART, 'timeout refunded')
     ok(true, `a hung model times out and REFUNDS the ${DRAFT_COST_CHEAP} (draftFailed in the log)`)
     ok((dave.view!.you?.hand.length ?? 0) === 2, 'and no draft landed from the hang')
@@ -548,12 +556,12 @@ async function main(): Promise<void> {
 
     // fenced-JSON tolerance: prose + ```json fence still parses
     dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'cheap', order: 'FENCED' })
-    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 3, 'fenced draft arrived')
+    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 3 && v.you!.pending.length === 0, 'fenced draft arrived')
     ok(dave.view!.you!.hand.some((sl) => sl.script.verb === 'refine' && sl.script.id === 'q3a'), 'fenced JSON tolerated — the refine draft landed')
 
     // gibberish → the ORGANIC hallucination fallback (a flawed preset, no refund)
     dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'cheap', order: 'GARBAGE' })
-    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 4, 'gibberish fallback arrived')
+    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 4 && v.you!.pending.length === 0, 'gibberish fallback arrived')
     const organic = dave.view!.you!.hand.find((sl) => sl.script.id === 'q4a')
     ok(organic !== undefined, 'unparseable model output still serves a draft (the organic path)')
     ok(organic !== undefined && !staticCheck(organic.script).ok, 'and the organic fallback is oracle-RED — an honest hallucination')
@@ -566,7 +574,7 @@ async function main(): Promise<void> {
     })
     const httpReqBody = await httpReq.json()
     ok(httpReq.status === 200 && httpReqBody.ok && httpReqBody.reqId === 'q5', `HTTP draft-request lands with the hinge token too (either surface may ask; reqId ${httpReqBody.reqId})`)
-    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 6, 'HTTP-requested drafts arrived')
+    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 6 && v.you!.pending.length === 0, 'HTTP-requested drafts arrived')
     const reqNoToken = await fetch(`${BASE}/api/room/${davePin}/draft-request`, { method: 'POST', body: '{"tier":"cheap"}' })
     ok(reqNoToken.status === 401, 'HTTP draft-request with no token → 401')
 
