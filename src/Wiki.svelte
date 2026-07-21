@@ -98,6 +98,6 @@
     </section>
   {/each}
   <p class="faint" style="text-align:center; margin-top:var(--s-6)">
-    your apprentice drafts · only a human arms
+    your agent writes real scripts · the oracle gates the shared works · the launch is a human vote
   </p>
 </div>
