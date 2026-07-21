@@ -1,211 +1,109 @@
-// The ORACLE — deterministic script verification. Two layers:
-//   1. staticCheck: unknown verb/field, wrong/missing params, out-of-bounds
-//      values, bad vein ids, phantom goods, impossible conditions. Pure
-//      function of the script.
-//   2. oracle: staticCheck + a DRY-RUN against a snapshot of the workshop —
-//      predicts the next-3-tick yield (or flags why it would sit idle), models
-//      the bound vein's reserve ("vein exhausts in ~5"), and quotes BASE
-//      prices ONLY: market events (rushes) are announced on the room board,
-//      never through this API — the asymmetry is a rule, not an oversight.
-// Every hallucination class flawScript can produce MUST go red here — that
-// contract is enforced by smoke.ts. The oracle is the switch.
+// The ORACLE — deterministic verification of a REAL Starlark script. The
+// engine dry-run itself happens SERVER-SIDE (server/engine.ts spawns the Go
+// engine); this module is the pure half both sides share:
+//   1. staticCheck: source-level checks that need no interpreter (size,
+//      emptiness, obvious footguns).
+//   2. judgeDryRun: given the engine's dry-run Response, decide the verdict —
+//      compile/runtime errors are red, gas overruns are red, unknown or
+//      out-of-schema actions are red, an action-less run is green-with-a-note
+//      (a watcher script is legal).
+// The verdict this produces enters the command log as DATA (oracleResult /
+// deploy.verified) — replays re-apply the verdict, never the engine.
 
-import {
-  BOOST_RISK_PER_STEP,
-  CHARM_MARKET_MAX,
-  CHARM_MARKET_MIN,
-  CRAFT_MATTER_PER_CHARM,
-  CRAFT_WIDGETS_PER_CHARM,
-  GREMLIN_MAX,
-  MARKET_MAX,
-  MARKET_MIN,
-  RUSH_MULT_MAX,
-  TOKEN_CAP,
-  TOKEN_REGEN,
-  VERB_PARAMS,
-} from './balance.ts'
-import { condPasses, pressureAt, runVerb, sellGood, stepCharmMarket, stepMarket } from './world.ts'
-import { CONDITION_FIELDS, CONDITION_OPS, VERBS, type Script, type SimState, type VeinState, type Verdict, type Workshop } from './types.ts'
+import { ACTION_TYPES, type Action, type Verdict } from './types.ts'
+import { CONTRIBUTE_RATE_MAX, CRAFT_RATE_MAX, FARM_RATE_MAX, GATHER_RATE_MAX, SOURCE_MAX_BYTES, STORE_RATE_MAX, VEIN_ID_MAX } from './balance.ts'
 
-export interface TickPrediction {
-  tick: number
-  ran: boolean // did the condition pass this tick?
-  tokens: number // deltas the script itself would cause (regen excluded)
-  matter: number
-  widgets: number
-  charms: number
-}
+// ── Layer 1: static source checks ───────────────────────────────────────────
 
-export interface OracleReport extends Verdict {
-  prediction: TickPrediction[] | null // null when the verdict is red
-}
-
-/** Inclusive value range a condition field can ever hold — for detecting
- * conditions that can never be true. Market fields range up to max × the top
- * rush multiplier (conditions read EFFECTIVE prices — a sell gate above base
- * max can legitimately fire during a rush the board announced). */
-function fieldRange(field: string): [number, number] {
-  switch (field) {
-    case 'tokens': return [0, TOKEN_CAP]
-    case 'gremlin': return [0, GREMLIN_MAX]
-    case 'market': return [MARKET_MIN, MARKET_MAX * RUSH_MULT_MAX]
-    case 'marketCharms': return [CHARM_MARKET_MIN, CHARM_MARKET_MAX * RUSH_MULT_MAX]
-    default: return [0, Infinity] // matter, widgets, charms, tick
-  }
-}
-
-// ── Layer 1: static validation ───────────────────────────────────────────────
-
-export function staticCheck(script: Script): Verdict {
+export function staticCheck(source: string): Verdict {
   const reasons: string[] = []
-
-  if (!(VERBS as readonly string[]).includes(script.verb)) {
-    reasons.push(`unknown verb '${script.verb}' — known verbs: ${VERBS.join(', ')}`)
-  } else {
-    const specs = VERB_PARAMS[script.verb]
-    const expected = specs.map((sp) => sp.name)
-    for (const sp of specs) {
-      const v = script.params[sp.name]
-      if (v === undefined) {
-        if (!sp.optional) reasons.push(`missing param '${sp.name}' for ${script.verb}`)
-        continue
-      }
-      if (sp.values) {
-        if (typeof v !== 'string' || !sp.values.includes(v)) {
-          reasons.push(`param '${sp.name}' must be one of ${sp.values.join('|')} (got ${JSON.stringify(v)})`)
-        }
-        continue
-      }
-      if (typeof v !== 'number' || !Number.isInteger(v)) {
-        reasons.push(`param '${sp.name}' must be an integer (got ${JSON.stringify(v)})`)
-        continue
-      }
-      const min = sp.min ?? 0
-      const max = sp.max ?? Infinity
-      if (v < min || v > max) {
-        reasons.push(`param '${sp.name}' = ${v} is out of bounds [${min}..${max}]${v === max * 10 || v >= max * 10 ? ' — off by 10x?' : ''}`)
-      }
-    }
-    for (const k of Object.keys(script.params)) {
-      if (!expected.includes(k)) {
-        reasons.push(`unknown param '${k}' for ${script.verb} (expects: ${expected.join(', ')})`)
-      }
-    }
-  }
-
-  if (script.when !== undefined) {
-    const c = script.when
-    if (!(CONDITION_FIELDS as readonly string[]).includes(c.field)) {
-      reasons.push(`unknown field '${c.field}' in condition — known fields: ${CONDITION_FIELDS.join(', ')}`)
-    } else if (!(CONDITION_OPS as readonly string[]).includes(c.op)) {
-      reasons.push(`unknown operator '${c.op}' in condition — known: ${CONDITION_OPS.join(' ')}`)
-    } else if (!Number.isFinite(c.value)) {
-      reasons.push(`condition value must be a finite number`)
-    } else {
-      const [lo, hi] = fieldRange(c.field)
-      const impossible =
-        (c.op === '<' && c.value <= lo) ||
-        (c.op === '<=' && c.value < lo) ||
-        (c.op === '>' && c.value >= hi) ||
-        (c.op === '>=' && c.value > hi) ||
-        (c.op === '==' && (c.value < lo || c.value > hi || !Number.isInteger(c.value)))
-      if (impossible) {
-        reasons.push(`condition can never be true (${c.field} is always within [${lo}..${hi === Infinity ? '∞' : hi}], so '${c.field} ${c.op} ${c.value}' never fires)`)
-      }
-    }
-  }
-
+  if (typeof source !== 'string' || source.trim().length === 0) reasons.push('empty script')
+  else if (source.length > SOURCE_MAX_BYTES) reasons.push(`script too large (${source.length} bytes, max ${SOURCE_MAX_BYTES})`)
   return { ok: reasons.length === 0, reasons }
 }
 
-// ── Layer 2: dry-run against a snapshot ──────────────────────────────────────
+// ── Layer 2: judge one action against the sim's schema ──────────────────────
 
-/** Full oracle: static verdict + a 3-tick dry-run prediction. Pure — the
- * caller's state is untouched. The prediction models THIS script alone against
- * the moving world schedules (other armed scripts hold still — a D1
- * simplification, noted in the report). Harvest drains a SCRATCH copy of the
- * bound vein; prices are BASE drift only — rush windows live on the board. */
-export function oracle(s: SimState, player: number, script: Script, ticks = 3): OracleReport {
-  const v = staticCheck(script)
-  if (!v.ok) return { ...v, prediction: null }
+const STRUCTURES = ['wall', 'granary', 'beacon', 'ark'] as const
 
-  const src = s.players[player]
-  const scratch: Workshop = {
-    name: src?.name ?? 'dry-run',
-    tokens: src?.tokens ?? 0,
-    matter: src?.matter ?? 0,
-    widgets: src?.widgets ?? 0,
-    charms: src?.charms ?? 0,
-    widgetsSold: 0,
-    charmsSold: 0,
-    contractScore: 0,
-    prospects: [],
-    disasters: 0,
-    uptime: 0,
-    waste: 0,
-    scripts: [],
-    pending: [],
+function intOf(a: Action, k: string): number | null {
+  const v = a[k]
+  return typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : null
+}
+
+/** Schema-check one emitted action (bounds; the world state is NOT consulted
+ * — a dry-run can't know future stock). Returns reasons (empty = fine). */
+export function checkAction(a: Action): string[] {
+  const reasons: string[] = []
+  if (!(ACTION_TYPES as readonly string[]).includes(a.type)) {
+    reasons.push(`unknown action '${String(a.type)}' — known: ${ACTION_TYPES.join(', ')}`)
+    return reasons
   }
-  const scratchVeins: VeinState[] = s.veins.map((vn) => ({ ...vn }))
-  let market = s.market
-  let marketCharms = s.marketCharms
-  const prediction: TickPrediction[] = []
-  let ranCount = 0
-  for (let i = 1; i <= ticks; i++) {
-    const t = s.tick + i
-    market = stepMarket(market, s.seed, t)
-    marketCharms = stepCharmMarket(marketCharms, s.seed, t)
-    // BASE prices on purpose — the rush forecast is the humans' information
-    const world = { tick: t, market, marketCharms, gremlin: pressureAt(t) }
-    scratch.tokens = Math.min(TOKEN_CAP, scratch.tokens + TOKEN_REGEN)
-    const before = { tokens: scratch.tokens, matter: scratch.matter, widgets: scratch.widgets, charms: scratch.charms }
-    const ran = condPasses(world, scratch, script.when)
-    if (ran) {
-      runVerb(world, scratch, script, 1, scratchVeins)
-      ranCount++
+  switch (a.type) {
+    case 'gather': {
+      const node = intOf(a, 'node')
+      const rate = intOf(a, 'rate')
+      if (node === null || node < 1 || node > VEIN_ID_MAX) reasons.push(`gather.node must be 1..${VEIN_ID_MAX} (got ${JSON.stringify(a['node'])})`)
+      if (rate === null || rate < 1 || rate > GATHER_RATE_MAX) reasons.push(`gather.rate must be 1..${GATHER_RATE_MAX} (got ${JSON.stringify(a['rate'])})`)
+      break
     }
-    prediction.push({
-      tick: t,
-      ran,
-      tokens: scratch.tokens - before.tokens,
-      matter: scratch.matter - before.matter,
-      widgets: scratch.widgets - before.widgets,
-      charms: scratch.charms - before.charms,
-    })
+    case 'farm': {
+      const rate = intOf(a, 'rate')
+      if (rate === null || rate < 1 || rate > FARM_RATE_MAX) reasons.push(`farm.rate must be 1..${FARM_RATE_MAX} (got ${JSON.stringify(a['rate'])})`)
+      break
+    }
+    case 'craft': {
+      const amount = intOf(a, 'amount')
+      if (amount === null || amount < 1 || amount > CRAFT_RATE_MAX) reasons.push(`craft.amount must be 1..${CRAFT_RATE_MAX} (got ${JSON.stringify(a['amount'])})`)
+      break
+    }
+    case 'contribute': {
+      const st = a['structure']
+      const amount = intOf(a, 'amount')
+      if (typeof st !== 'string' || !(STRUCTURES as readonly string[]).includes(st)) reasons.push(`contribute.structure must be ${STRUCTURES.join('|')} (got ${JSON.stringify(st)})`)
+      if (amount === null || amount < 1 || amount > CONTRIBUTE_RATE_MAX) reasons.push(`contribute.amount must be 1..${CONTRIBUTE_RATE_MAX} (got ${JSON.stringify(a['amount'])})`)
+      break
+    }
+    case 'store': {
+      const amount = intOf(a, 'amount')
+      if (amount === null || amount < 1 || amount > STORE_RATE_MAX) reasons.push(`store.amount must be 1..${STORE_RATE_MAX} (got ${JSON.stringify(a['amount'])})`)
+      break
+    }
   }
+  return reasons
+}
 
+// ── Layer 3: judge the engine's dry-run response ────────────────────────────
+
+/** What the server's engine dry-run hands back for judgment. */
+export interface DryRunOutput {
+  actions: Action[]
+  logs: string[]
+  gasUsed: number
+  err: string | null
+}
+
+export interface OracleReport extends Verdict {
+  /** What the script WOULD do this tick — shown to the seat (own-seat info). */
+  actions: Action[]
+  logs: string[]
+  gasUsed: number
+}
+
+/** The full verdict: static + engine result + per-action schema. Errors and
+ * schema violations are red; an idle run is green with a note. */
+export function judgeDryRun(source: string, out: DryRunOutput): OracleReport {
+  const reasons: string[] = []
+  const sc = staticCheck(source)
+  reasons.push(...sc.reasons)
+  if (out.err) {
+    reasons.push(out.err.split('\n').slice(0, 3).join(' · ').slice(0, 300))
+  }
+  for (const a of out.actions) {
+    for (const r of checkAction(a)) reasons.push(r)
+  }
+  const ok = reasons.length === 0
   const notes: string[] = []
-  if (ranCount === 0) {
-    notes.push(`note: the condition holds it idle for the next ${ticks} ticks`)
-  } else if (script.verb === 'sell' && prediction.every((pr) => pr.tokens === 0)) {
-    notes.push(`note: nothing to sell for the next ${ticks} ticks (no ${sellGood(script)} on hand)`)
-  } else if (script.verb === 'refine' && prediction.every((pr) => pr.widgets === 0)) {
-    notes.push('note: not enough matter to refine for the next ' + ticks + ' ticks')
-  } else if (script.verb === 'craft' && prediction.every((pr) => pr.charms === 0)) {
-    notes.push(`note: starved for the next ${ticks} ticks (a charm needs ${CRAFT_MATTER_PER_CHARM} matter + ${CRAFT_WIDGETS_PER_CHARM} widget)`)
-  }
-  if (script.verb === 'harvest') {
-    const node = script.params['node']
-    const vein = s.veins.find((vn) => vn.id === node)
-    if (!vein) {
-      notes.push(`note: vein #${node} has not surfaced — it would idle until it does (prospect scouts the next one)`)
-    } else if (vein.reserve <= 0) {
-      notes.push(`note: vein #${node} is EXHAUSTED — this script would idle; re-target it`)
-    } else {
-      const drawPerTick = Math.min((script.params['rate'] as number) ?? 0, vein.rate)
-      if (drawPerTick > 0) {
-        notes.push(`note: vein #${node} holds ${vein.reserve} — exhausts in ~${Math.ceil(vein.reserve / drawPerTick)} ticks at this draw`)
-      }
-    }
-  }
-  if (script.verb === 'sell') {
-    notes.push('note: predicted at BASE prices — market events show on the room board, not in this API')
-  }
-  if (script.verb === 'boost') {
-    const m = script.params['mult'] as number
-    const riskPct = Math.round(((m - 1) * BOOST_RISK_PER_STEP * 100) / 65536)
-    notes.push(`note: boosts your other scripts ×${m}; ~${riskPct}% blowup risk per tick`)
-  }
-
-  return { ok: true, reasons: notes, prediction }
+  if (ok && out.actions.length === 0) notes.push('note: no actions this tick — a watcher script is legal, but is that what you meant?')
+  return { ok, reasons: ok ? notes : reasons, actions: out.actions, logs: out.logs, gasUsed: out.gasUsed }
 }

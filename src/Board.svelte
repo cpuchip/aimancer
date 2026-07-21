@@ -1,369 +1,217 @@
 <script lang="ts">
-  // The BIG SCREEN — worth projecting: phase banner + countdown, live
-  // scoreboard (movement animated), the DISASTER THEATER (celebratory,
-  // dedup'd, newest-first), market/gremlin trends, the intermission summary
-  // backdrop, and the reveal's delta table. Spectator ws — no hands, no
+  // The BIG SCREEN — the LIVING SETTLEMENT. Storm countdown big, the wall
+  // visibly absorbing, districts ringing the ark, milestone progress, the
+  // launch-vote tally, and the end screen. Spectator ws — no sources, no
   // tokens (redacted server-side; wstest proves it).
   import { flip } from 'svelte/animate'
   import { wsUrl } from './net.ts'
-  import { describeEvent, freshEvents, isDisaster, newFeedCursor } from '../shared/eventFeed.ts'
-  import { PHASE_BANNER, fmtClock } from './ui.ts'
-  import type { LobbyPlayer, RoomView, ServerMessage } from '../shared/protocol.ts'
+  import { describeEvent, freshEvents, isDisaster, isTriumph, newFeedCursor } from '../shared/eventFeed.ts'
+  import { MILESTONE_ORDER } from '../shared/sim/types.ts'
+  import { districtPos, fmtClock, statusIcon, stormUrgency, STRUCTURE_ICON, STRUCTURE_LABEL } from './ui.ts'
+  import type { RoomView, ServerMessage } from '../shared/protocol.ts'
 
   const { pin }: { pin: string } = $props()
 
   let view = $state<RoomView | null>(null)
   let status = $state('connecting…')
-  let lobbyPlayers = $state<LobbyPlayer[]>([])
-  let theater = $state<Array<{ line: string; big: boolean; key: number }>>([])
-  let marketTrend = $state<'up' | 'down' | 'flat'>('flat')
-  let gremlinTrend = $state<'up' | 'down' | 'flat'>('flat')
+  let theater = $state<Array<{ line: string; big: boolean; good: boolean; key: number }>>([])
   const feedCursor = newFeedCursor()
   let feedKey = 0
-  let prevMarket: number | null = null
-  let prevGremlin: number | null = null
+  let stormFlare = $state(0)
 
-  // wall-clock round countdown, interpolated between snapshots
+  // wall-clock interpolation between snapshots
   let snapAt = $state(0)
   let clockNow = $state(0)
   setInterval(() => (clockNow = performance.now()), 500)
-
-  // RTS map presentation state — purely visual, all derived from snapshots
-  let nestFlare = $state(0) // increments on a fresh gremlinSpike → one-shot flash
 
   const ws = new WebSocket(wsUrl())
   ws.onopen = () => ws.send(JSON.stringify({ type: 'watch', room: pin }))
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data) as ServerMessage
-    if (msg.type === 'lobby') {
-      status = msg.started ? 'live' : 'waiting for the host'
-      lobbyPlayers = msg.players
-    }
     if (msg.type === 'snapshot') {
-      const v = msg.view
       snapAt = performance.now()
-      if (prevMarket !== null && v.market !== prevMarket) marketTrend = v.market > prevMarket ? 'up' : 'down'
-      if (prevGremlin !== null && v.gremlin !== prevGremlin) gremlinTrend = v.gremlin > prevGremlin ? 'up' : 'down'
-      prevMarket = v.market
-      prevGremlin = v.gremlin
+      const v = msg.view
       view = v
       status = 'live'
-      const names = (i: number) => v.players[i]?.name ?? `P${i}`
+      const names = (i: number) => v.dyads[i]?.name ?? `D${i}`
       const fresh = freshEvents(feedCursor, v.events, v.eventSeq)
       if (fresh.length > 0) {
-        if (fresh.some((e) => e.t === 'gremlinSpike')) nestFlare++
+        if (fresh.some((e) => e.t === 'stormLanded')) stormFlare++
         theater = [
-          ...fresh.map((e) => ({ line: describeEvent(e, names), big: isDisaster(e), key: feedKey++ })).reverse(),
+          ...fresh.map((e) => ({ line: describeEvent(e, names), big: isDisaster(e), good: isTriumph(e), key: feedKey++ })).reverse(),
           ...theater,
-        ].slice(0, 24)
+        ].slice(0, 26)
       }
     }
     if (msg.type === 'error') status = msg.message
   }
   ws.onclose = () => (status = 'disconnected')
 
-  const ranked = $derived(view ? [...view.players].sort((a, b) => b.score - a.score) : [])
-  const phase = $derived(view?.phase ?? 'lobby')
-  const banner = $derived(PHASE_BANNER[phase] ?? PHASE_BANNER.lobby)
-  const trendGlyph = (t: 'up' | 'down' | 'flat') => (t === 'up' ? '▲' : t === 'down' ? '▼' : '·')
-
-  // ── the workshop map (RICH surface — the rush banner lives HERE, never in
-  // the agent's API view; CORE IDENTITY #2 made visible) ─────────────────────
-  const rush = $derived(view?.rush ?? null)
-  const veins = $derived(view?.veins ?? [])
-  const contracts = $derived(view?.contracts ?? [])
-  const openContracts = $derived(contracts.filter((c) => c.status === 'open'))
-  const claimedContracts = $derived(contracts.filter((c) => c.status === 'claimed'))
-  const playerHue = (i: number) => `hsl(${(i * 67) % 360} 72% 62%)`
-  /** Armed harvesters bound to a vein — each renders as a shuttling worker. */
-  const workersOn = (veinId: number) =>
-    view
-      ? view.players.flatMap((p) =>
-          p.scripts
-            .filter((sc) => sc.armed && sc.verb === 'harvest' && sc.node === veinId)
-            .map((sc) => ({ key: `${p.index}:${sc.id}`, player: p.index })),
-        )
-      : []
-  /** Workshop chip x-position (%) along the bottom strip. */
-  const chipX = (i: number) => 12 + i * (76 / Math.max(1, (view?.players.length ?? 1)))
-  const chipHasVerb = (i: number, verb: string) => view?.players[i]?.scripts.some((sc) => sc.armed && sc.verb === verb) ?? false
-
-  // ── round-end + auto-advance surfacing (the "silent freeze" hotfix) ────────
-  const roundComplete = $derived(view !== null && (phase === 'round1' || phase === 'round2') && view.ticksRemaining === 0)
-  const autoIn = $derived(view?.autoAdvanceIn ?? null)
-  const bannerTitle = $derived(roundComplete ? `${phase === 'round1' ? 'ROUND 1' : 'ROUND 2'} COMPLETE` : banner.title)
-  const bannerSub = $derived(
-    roundComplete
-      ? autoIn !== null
-        ? `advancing in ${autoIn}… — the host can hold or call it now`
-        : view?.autoHeld
-          ? 'held — the host calls it from their phone'
-          : "waiting for the host to call it (host: it's the big button on your phone)"
-      : phase === 'intermission' && autoIn !== null
-        ? `round 2 in ${autoIn}s — the host can hold`
-        : banner.sub,
-  )
-  const roundClockMs = $derived.by(() => {
-    if (!view || (phase !== 'round1' && phase !== 'round2')) return null
-    const tr = view.ticksRemaining
-    if (tr === null || tr <= 0 || view.nextTickInMs === null) return null
-    return Math.max(0, (tr - 1) * view.tickMs + view.nextTickInMs - (clockNow - snapAt))
-  })
-  /** A seat's agent is "live" if it spoke on the worker surface within 60s. */
+  const urgency = $derived(view ? stormUrgency(view.storm.inTicks) : 'calm')
+  const wallPct = $derived(view ? Math.min(100, Math.round((100 * view.structures.wall.hp) / Math.max(1, view.structures.wall.hpMax))) : 0)
+  const arkPct = $derived(view ? Math.min(100, Math.round((100 * view.structures.ark.parts) / view.structures.ark.partsRequired)) : 0)
+  const ranked = $derived(view ? [...view.dyads].sort((a, b) => b.contributed - a.contributed) : [])
+  const stormClockMs = $derived(view && view.nextTickInMs !== null ? Math.max(0, (view.storm.inTicks - 1) * view.tickMs + view.nextTickInMs - (clockNow - snapAt)) : null)
   const agentLive = (agoMs: number | null) => agoMs !== null && agoMs + (clockNow - snapAt) < 60_000
-
-  function fateIcon(sc: { status: string; armed: boolean; yolo: boolean }): string {
-    if (sc.status === 'dead') return '💀'
-    if (sc.status === 'blown') return '🔥'
-    if (sc.status === 'autoDisarmed') return '🔌'
-    if (sc.armed) return sc.yolo ? '🧨' : '🟢'
-    return '🃏'
-  }
 </script>
 
 <div class="board">
   <div class="board-head">
     <img class="board-emblem" src="/assets/emblem.png" alt="" />
     <span class="wordmark">AIMANCER</span>
-    <span class="muted board-tag">your apprentice drafts · only a human arms</span>
-  </div>
-  <div class="phase-banner phase-{phase}{roundComplete ? ' complete' : ''}">
-    <span class="title">{bannerTitle}</span>
-    <span class="sub">{bannerSub}</span>
-    {#if roundClockMs !== null && view}
-      <span class="count num">{fmtClock(roundClockMs)} <span class="muted" style="font-size:var(--t-md)">· {view.ticksRemaining} {view.ticksRemaining === 1 ? 'tick' : 'ticks'}</span></span>
-    {:else if autoIn !== null}
-      <span class="count num">▶ {autoIn}s</span>
-    {/if}
+    <span class="muted board-tag">one settlement · real scripts · the storm is coming</span>
   </div>
 
-  <div class="row" style="justify-content:space-between">
-    <span class="join-hint muted">join at <b style="letter-spacing:normal">{location.host}</b> · PIN <b>{pin}</b></span>
-    {#if view && view.started}
-      <span class="row" style="gap:var(--s-4)">
-        <span class="trend {marketTrend === 'up' ? 'up' : marketTrend === 'down' ? 'down' : ''}">📈 widgets {view.market}⚡ {trendGlyph(marketTrend)}</span>
-        <span class="trend">🧿 charms {view.marketCharms}⚡</span>
-        <span class="trend {gremlinTrend === 'up' ? 'down' : ''}"><img class="ticon" src="/assets/gremlin_a.png" alt="gremlin" /> gremlin {view.gremlin}/10 {trendGlyph(gremlinTrend)}</span>
-        <span class="muted num">tick {view.tick} · {view.tickMs / 1000}s</span>
-      </span>
-    {:else}
-      <span class="muted">{status}</span>
-    {/if}
-  </div>
-
-  {#if rush && view && view.started && phase !== 'reveal'}
-    <!-- THE BOARD-ONLY ANNOUNCEMENT: the agent API never carries this. -->
-    <div class="rush-banner rush-{rush.good}">
-      <span class="rush-icon">{rush.good === 'charms' ? '🧿' : '⚙️'}</span>
-      <b>{rush.good.toUpperCase()} RUSH ×{rush.mult}</b>
-      <span>{rush.ticksLeft} {rush.ticksLeft === 1 ? 'tick' : 'ticks'} left — tell your agent!</span>
+  {#if view && view.launched && view.end}
+    <div class="phase-banner phase-reveal">
+      <span class="title">🚀 THE ARK HAS LAUNCHED</span>
+      <span class="sub">{view.end.goVotes} GO of {view.end.dyads.length} dyads · {view.end.stormsWeathered} storms weathered · {view.end.survivors} survivors aboard · {view.end.totalParts} parts built</span>
     </div>
-  {/if}
-
-  {#if !view || !view.started}
-    <div class="card lobby-hero" style="text-align:center; padding:var(--s-7)">
-      <img class="lobby-emblem" src="/assets/emblem.png" alt="" />
-      <p class="muted" style="font-size:var(--t-xl); margin:0">join at <b style="color:var(--ink)">{location.host}</b> · PIN</p>
-      <div style="font-size:var(--t-3xl); font-weight:700; letter-spacing:0.3em">{pin}</div>
-      <div class="lobby-steps">
-        <span><b>1</b> join on your phone</span>
-        <span><b>2</b> connect your agent (copy the prompt)</span>
-        <span><b>3</b> host starts the game</span>
-      </div>
-      <p class="muted" style="font-size:var(--t-lg)">sell widgets · verified scripts survive · YOLO and pray</p>
-      {#if lobbyPlayers.length}
-        <p style="font-size:var(--t-lg)">
-          {#each lobbyPlayers as p (p.index)}
-            <span class="chip drafted" style="margin:0 var(--s-1)">{agentLive(p.agentSeenAgoMs) ? '🤖 ' : ''}{p.name}{p.online ? '' : ' (away)'}</span>
-          {/each}
-        </p>
-      {/if}
-      <p class="faint">📖 full rules — <a href="/wiki" style="color:var(--accent)">{location.host}/wiki</a></p>
-    </div>
-  {:else if phase === 'reveal' && view.delta}
     <div class="delta-total">
-      <img class="reveal-eye" src="/assets/oracle_eye.png" alt="" />
-      THE ROOM: {view.delta.totals.r1Score} → {view.delta.totals.r2Score}
-      <span class={view.delta.totals.score >= 0 ? 'delta-pos' : 'delta-neg'}>
-        {view.delta.totals.score >= 0 ? '+' : ''}{view.delta.totals.score}
-      </span>
-      <div class="muted" style="font-size:var(--t-md); font-weight:400">
-        same world, same seed — the only variable was the oracle (and you)
-      </div>
+      THE SETTLEMENT HELD FOR <span class="delta-pos">{view.end.launchedAtTick}</span> TICKS
+      <div class="muted" style="font-size:var(--t-md); font-weight:400">verification was armor — read the storm-damage column</div>
     </div>
     <table>
-      <thead>
-        <tr>
-          <th>workshop</th>
-          <th class="r">round 1</th>
-          <th class="r">round 2</th>
-          <th class="r">Δ score</th>
-          <th class="r">Δ disasters</th>
-          <th class="r">Δ sold</th>
-          <th class="r">Δ waste</th>
-        </tr>
-      </thead>
+      <thead><tr><th>district</th><th class="r">parts given</th><th class="r">storm damage</th><th class="r">scripts verified</th><th class="r">killed</th><th>stood?</th></tr></thead>
       <tbody>
-        {#each [...view.delta.players].sort((a, b) => b.dScore - a.dScore) as p (p.name)}
+        {#each [...view.end.dyads].sort((a, b) => b.contributed - a.contributed) as d (d.district)}
           <tr>
-            <td>{p.name}</td>
-            <td class="r num">{p.r1.score}</td>
-            <td class="r num">{p.r2.score}</td>
-            <td class="r num {p.dScore >= 0 ? 'delta-pos' : 'delta-neg'}">{p.dScore >= 0 ? '+' : ''}{p.dScore}</td>
-            <td class="r num {p.dDisasters <= 0 ? 'delta-pos' : 'delta-neg'}">{p.dDisasters > 0 ? '+' : ''}{p.dDisasters}</td>
-            <td class="r num">{p.dWidgetsSold >= 0 ? '+' : ''}{p.dWidgetsSold}</td>
-            <td class="r num">{p.dWaste > 0 ? '+' : ''}{p.dWaste}</td>
+            <td>{d.name}</td>
+            <td class="r num score-cell">{d.contributed}</td>
+            <td class="r num">{d.stormDamage}</td>
+            <td class="r num">{d.scriptsVerified}/{d.scriptsDeployed}</td>
+            <td class="r num">{d.scriptsKilled}</td>
+            <td>{d.survived ? '🏠 stood' : '🌪 rubble'}</td>
           </tr>
         {/each}
       </tbody>
     </table>
+    <p class="muted" style="text-align:center">the books are open — every script source is public in the room log · same PIN = same world, run it back</p>
   {:else}
-    {#if phase === 'intermission' && view.round1Summary}
-      <div class="card">
-        <h2 style="margin-top:0">Round 1 — the naive round, on the record</h2>
-        <table>
-          <thead>
-            <tr><th>workshop</th><th class="r">score</th><th class="r">sold</th><th class="r">disasters</th><th class="r">waste</th><th class="r">uptime</th></tr>
-          </thead>
-          <tbody>
-            {#each [...view.round1Summary.players].sort((a, b) => b.score - a.score) as p (p.name)}
-              <tr>
-                <td>{p.name}</td>
-                <td class="r num score-cell">{p.score}</td>
-                <td class="r num">{p.widgetsSold}</td>
-                <td class="r num">{p.disasters}</td>
-                <td class="r num">{p.waste}</td>
-                <td class="r num">{p.uptime}</td>
-              </tr>
-            {/each}
-            <tr>
-              <td class="muted">the room</td>
-              <td class="r num score-cell">{view.round1Summary.totals.score}</td>
-              <td class="r num">{view.round1Summary.totals.widgetsSold}</td>
-              <td class="r num">{view.round1Summary.totals.disasters}</td>
-              <td class="r num">{view.round1Summary.totals.waste}</td>
-              <td></td>
-            </tr>
-          </tbody>
-        </table>
-        <p class="muted">world frozen · phones can still stock their hands · round 2 replays this exact world — verified</p>
-      </div>
-    {/if}
-
-    <!-- ── THE WORKSHOP MAP — the room-watchable centerpiece ─────────────── -->
-    <div class="map" class:map-rush={rush !== null}>
-      <div class="zone zone-fields"><span class="zone-label">crystal fields</span></div>
-      <div class="zone zone-market"><span class="zone-label">market quarter</span></div>
-      <div class="zone zone-wastes"><span class="zone-label">gremlin wastes</span></div>
-
-      {#each veins as v (v.id)}
-        <div
-          class="vein"
-          class:dry={v.reserve <= 0}
-          class:fresh={v.spawnedAt > 0 && view.tick - v.spawnedAt <= 1}
-          style="left:{v.x}%; top:{v.y + 6}%"
-        >
-          <span class="vein-ping"></span>
-          <img class="vein-img" src="/assets/res_matter.png" alt="vein" />
-          <div class="vein-fill"><div class="vein-fill-bar" style="height:{Math.round((100 * v.reserve) / Math.max(1, v.reserveMax))}%"></div></div>
-          <span class="vein-tag num">#{v.id} · r{v.rate}{v.reserve <= 0 ? ' · DRY' : ''}</span>
-          {#each workersOn(v.id) as wk, wi (wk.key)}
-            <span
-              class="worker"
-              style="background:{playerHue(wk.player)}; --dx:{chipX(wk.player) - v.x}cqw; --dy:{92 - (v.y + 6)}cqh; animation-delay:{wi * 0.7}s"
-            ></span>
-          {/each}
-        </div>
-      {/each}
-
-      <div class="stall" class:stall-rush={rush?.good === 'widgets'} style="left:86%; top:18%">
-        <img class="stall-img" src="/assets/res_widgets.png" alt="widget stall" />
-        <span class="stall-price num"><b>{view.market}</b>⚡</span>
-        {#if rush?.good === 'widgets'}<span class="stall-mult">×{rush.mult} · {rush.ticksLeft}t</span>{/if}
-      </div>
-      <div class="stall" class:stall-rush={rush?.good === 'charms'} style="left:86%; top:52%">
-        <span class="stall-emoji">🧿</span>
-        <span class="stall-price num"><b>{view.marketCharms}</b>⚡</span>
-        {#if rush?.good === 'charms'}<span class="stall-mult">×{rush.mult} · {rush.ticksLeft}t</span>{/if}
-      </div>
-      {#if !rush && view.nextRushInTicks !== undefined}
-        <span class="rush-forecast muted num" style="left:86%; top:80%">rush in ~{view.nextRushInTicks}t</span>
+    <!-- THE STORM BANNER — the whole room watches this number -->
+    <div class="storm-banner storm-{urgency}" style="font-size:var(--t-xl)">
+      <span class="storm-icon">🌩</span>
+      <b>STORM {view?.storm.index ?? '…'}</b>
+      {#if view}
+        <span class="count num">{view.storm.inTicks} ticks{stormClockMs !== null ? ` · ${fmtClock(stormClockMs)}` : ''}</span>
+        <span>severity <b class="num">{view.storm.severity}</b></span>
+        <span class="grow"></span>
+        <span>🧱 wall <b class="num">{view.structures.wall.hp}</b>/{view.structures.wall.hpMax}</span>
+        <div class="ms-bar" style="width:120px"><div class="ms-fill" class:ms-low={wallPct < 30} style="width:{wallPct}%"></div></div>
+      {:else}
+        <span class="muted">{status}</span>
       {/if}
-
-      <div class="nest" style="left:10%; top:80%">
-        {#key nestFlare}<span class="nest-flare" class:go={nestFlare > 0}></span>{/key}
-        <img class="nest-img" src="/assets/gremlin_a.png" alt="gremlin nest" />
-        <span class="vein-tag num">nest · {view.gremlin}/10</span>
-      </div>
-
-      <!-- workshop strip: each dyad's chip; armed craft/sell pulse it -->
-      {#each view.players as p (p.index)}
-        <div
-          class="shop-chip"
-          class:busy={chipHasVerb(p.index, 'craft') || chipHasVerb(p.index, 'sell')}
-          style="left:{chipX(p.index)}%; top:92%; border-color:{playerHue(p.index)}"
-          title={p.name}
-        >
-          <span class="shop-dot" style="background:{playerHue(p.index)}"></span>{p.name.slice(0, 8)}
-        </div>
-      {/each}
     </div>
 
-    {#if contracts.length > 0}
-      <div class="contract-strip">
-        {#each openContracts as c (c.id)}
-          <span class="contract-chip open">📜 #{c.id}: {c.qty} {c.good} → +{c.bonus} <span class="muted">(claim on your phone)</span></span>
+    <div class="row" style="justify-content:space-between">
+      <span class="join-hint muted">join at <b style="letter-spacing:normal">{location.host}</b> · PIN <b>{pin}</b> · drop in anytime</span>
+      {#if view}
+        <span class="row" style="gap:var(--s-4)">
+          {#if view.arkReady}
+            <span class="trend up">🚀 VOTE OPEN: {view.votes.go} GO · {view.votes.noGo} NO-GO · {view.votes.pending} thinking</span>
+          {/if}
+          {#if view.survivors > 0}<span class="trend">🧍 {view.survivors} survivors · slots {view.scriptSlots}</span>{/if}
+          <span class="muted num">tick {view.tick} · {view.tickMs / 1000}s</span>
+        </span>
+      {/if}
+    </div>
+
+    {#if view}
+      <!-- ── THE SETTLEMENT MAP ──────────────────────────────────────────── -->
+      <div class="map" class:map-rush={urgency === 'imminent'}>
+        {#key stormFlare}<span class="nest-flare" class:go={stormFlare > 0} style="left:50%; top:40%"></span>{/key}
+        <div class="zone zone-fields"><span class="zone-label">ore fields</span></div>
+        <div class="zone zone-wastes"><span class="zone-label">the storm horizon</span></div>
+
+        <!-- the wall: a ring whose glow is its HP -->
+        <div class="wallring" class:done={view.structures.wall.complete} style="opacity:{0.25 + 0.75 * (wallPct / 100)}"></div>
+
+        <!-- the ark rises in the center -->
+        <div class="ark-center">
+          <div class="ark-body" style="filter:saturate({0.3 + 0.7 * (arkPct / 100)})">🚀</div>
+          <div class="ms-bar" style="width:90px"><div class="ms-fill" style="width:{arkPct}%"></div></div>
+          <span class="vein-tag num">ARK {view.structures.ark.parts}/{view.structures.ark.partsRequired}</span>
+        </div>
+
+        <!-- shared works flank the ark -->
+        <div class="works-chip" class:built={view.structures.granary.complete} style="left:38%; top:34%">🌾<span class="vein-tag num">{view.structures.granary.complete ? `${view.granaryFood} food` : `${view.structures.granary.parts}/${view.structures.granary.partsRequired}`}</span></div>
+        <div class="works-chip" class:built={view.structures.beacon.complete} style="left:60%; top:34%">🗼<span class="vein-tag num">{view.structures.beacon.complete ? `${view.survivors} in` : `${view.structures.beacon.parts}/${view.structures.beacon.partsRequired}`}</span></div>
+
+        {#each view.veins as v (v.id)}
+          <div class="vein" class:dry={v.reserve <= 0} class:fresh={v.spawnedAt > 0 && view.tick - v.spawnedAt <= 2} style="left:{v.x}%; top:{v.y}%">
+            <span class="vein-ping"></span>
+            <img class="vein-img" src="/assets/res_matter.png" alt="vein" />
+            <div class="vein-fill"><div class="vein-fill-bar" style="height:{Math.round((100 * v.reserve) / Math.max(1, v.reserveMax))}%"></div></div>
+            <span class="vein-tag num">#{v.id} · r{v.rate}{v.reserve <= 0 ? ' · DRY' : ''}</span>
+          </div>
         {/each}
-        {#each claimedContracts as c (c.id)}
-          <span class="contract-chip claimed" style="border-color:{playerHue(c.player ?? 0)}">
-            📜 #{c.id} {view.players[c.player ?? 0]?.name}: {c.progress}/{c.qty} {c.good} · by t{c.deadline}
-          </span>
+
+        <!-- districts ring the settlement -->
+        {#each view.dyads as d (d.index)}
+          {@const pos = districtPos(d.index, view.dyads.length)}
+          <div class="district-chip" class:hurt={d.integrity < 50} class:rubble={d.integrity <= 0} style="left:{pos.x}%; top:{pos.y}%">
+            <span class="dname">{d.name.slice(0, 10)}{agentLive(d.agentSeenAgoMs) ? ' 🤖' : ''}</span>
+            <div class="ms-bar" style="width:64px"><div class="ms-fill" class:ms-low={d.integrity < 40} style="width:{d.integrity}%"></div></div>
+            <span class="dscripts">{#each d.scripts.filter((s) => s.status !== 'stopped') as sc (sc.id)}<span title="{sc.name}: {sc.lastNote ?? sc.status}">{statusIcon(sc)}</span>{/each}</span>
+          </div>
         {/each}
+      </div>
+
+      <!-- milestones row -->
+      <div class="row" style="gap:var(--s-4); flex-wrap:wrap">
+        {#each MILESTONE_ORDER as k (k)}
+          {@const st = view.structures[k]}
+          <div class="ms-row grow" class:ms-done={st.complete} class:ms-frontier={view.frontier === k} style="min-width:180px">
+            <span class="ms-label">{STRUCTURE_ICON[k]} {STRUCTURE_LABEL[k]}</span>
+            <div class="ms-bar grow"><div class="ms-fill" style="width:{Math.min(100, (100 * st.parts) / st.partsRequired)}%"></div></div>
+            <span class="num muted">{st.complete ? '✓' : `${st.parts}/${st.partsRequired}`}</span>
+          </div>
+        {/each}
+      </div>
+
+      <div class="grid">
+        <div>
+          <h2>The dyads</h2>
+          <table>
+            <thead><tr><th>district</th><th class="r">⚡</th><th class="r">⛏ ore</th><th class="r">🌾</th><th class="r">🧩 parts</th><th class="r">given</th><th class="r">🏠</th><th>scripts</th><th>vote</th></tr></thead>
+            <tbody>
+              {#each ranked as d (d.index)}
+                <tr animate:flip={{ duration: 400 }}>
+                  <td>{d.name}{d.online ? '' : ' 💤'}<span class="agent-dot {agentLive(d.agentSeenAgoMs) ? 'live' : ''}" title={agentLive(d.agentSeenAgoMs) ? 'agent connected' : 'no agent'}>🤖</span></td>
+                  <td class="r num">{d.tokens}</td>
+                  <td class="r num">{d.ore}</td>
+                  <td class="r num">{d.food}</td>
+                  <td class="r num">{d.parts}</td>
+                  <td class="r num score-cell">{#key d.contributed}<span class="pop">{d.contributed}</span>{/key}</td>
+                  <td class="r num">{d.integrity}</td>
+                  <td>{#each d.scripts.filter((s) => s.status !== 'stopped') as sc (sc.id)}<span title="{sc.name} ({sc.scope}{sc.verified ? ', verified' : ''}): {sc.lastNote ?? sc.status}">{statusIcon(sc)}</span>{/each}</td>
+                  <td>{d.vote === true ? '🚀' : d.vote === false ? '🛑' : ''}</td>
+                </tr>
+              {/each}
+              {#if ranked.length === 0}
+                <tr><td colspan="9" class="muted">nobody home yet — join at {location.host} · PIN {pin}</td></tr>
+              {/if}
+            </tbody>
+          </table>
+          <p class="faint">🟢 verified · 🧨 unverified (storm bait) · 🌪💀 storm casualty — the wall absorbs for EVERYONE; contribute through the gate</p>
+        </div>
+        <div>
+          <h2>The record</h2>
+          <div class="events">
+            {#each theater as item (item.key)}
+              <div class={item.big ? 'theater-big' : item.good ? 'theater-good' : ''}>{item.line}</div>
+            {/each}
+            {#if theater.length === 0}<div class="muted">quiet… build while it lasts</div>{/if}
+          </div>
+        </div>
+      </div>
+    {:else}
+      <div class="card lobby-hero" style="text-align:center; padding:var(--s-7)">
+        <img class="lobby-emblem" src="/assets/emblem.png" alt="" />
+        <p class="muted" style="font-size:var(--t-xl); margin:0">join at <b style="color:var(--ink)">{location.host}</b> · PIN</p>
+        <div style="font-size:var(--t-3xl); font-weight:700; letter-spacing:0.3em">{pin}</div>
+        <p class="muted">{status}</p>
       </div>
     {/if}
-
-    <div class="grid">
-      <div>
-        <h2>Scoreboard</h2>
-        <table>
-          <thead>
-            <tr><th>#</th><th>workshop</th><th class="r">score</th><th class="r">⚡</th><th class="r">⚙ sold</th><th class="r">🧿 sold</th><th class="r">waste</th><th>scripts</th></tr>
-          </thead>
-          <tbody>
-            {#each ranked as p, i (p.index)}
-              <tr animate:flip={{ duration: 400 }}>
-                <td class="num muted">{i + 1}</td>
-                <td>
-                  {p.name}{p.online ? '' : ' 💤'}
-                  <span class="agent-dot {agentLive(p.agentSeenAgoMs) ? 'live' : ''}" title={agentLive(p.agentSeenAgoMs) ? 'agent connected' : 'no agent'}>🤖</span>
-                </td>
-                <td class="r num score-cell">
-                  {#key p.score}<span class="pop">{p.score}</span>{/key}
-                </td>
-                <td class="r num">{p.tokens}</td>
-                <td class="r num">{p.widgetsSold}</td>
-                <td class="r num">{p.charmsSold}</td>
-                <td class="r num">{p.waste}</td>
-                <td>
-                  {#each p.scripts as sc (sc.id)}<span title={sc.id}>{fateIcon(sc)}</span>{/each}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-      <div>
-        <h2>Disaster theater</h2>
-        <div class="events">
-          {#each theater as item (item.key)}
-            <div class={item.big ? 'theater-big' : ''}>
-              {#if item.big}<img class="ticon" src="/assets/gremlin_b.png" alt="" />{/if}
-              {item.line}
-            </div>
-          {/each}
-          {#if theater.length === 0}<div class="muted">quiet… for now</div>{/if}
-        </div>
-      </div>
-    </div>
   {/if}
 </div>

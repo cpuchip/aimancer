@@ -1,12 +1,11 @@
 // Event-feed plumbing shared by the phone and the board.
 //
-// THE DUPLICATE-APPEND FIX (D1 bug): the server pushes a snapshot on EVERY
-// command and tick, and a snapshot carries the WHOLE current-tick event array —
-// so a client that appends `view.events` on each snapshot re-appends everything
-// the tick had already shown. The sim now counts every event it has ever
-// emitted (SimState.eventSeq, monotonic — it survives the round-2 reset), the
-// snapshot carries that count, and freshEvents() slices exactly the unseen
-// tail. Proven over the real wire by wstest.
+// THE DUPLICATE-APPEND FIX (D1 bug, kept through the ark pivot): the server
+// pushes a snapshot on EVERY command and tick, and a snapshot carries the
+// WHOLE current-tick event array — so the sim counts every event it has ever
+// emitted (SimState.eventSeq, monotonic), the snapshot carries that count,
+// and freshEvents() slices exactly the unseen tail. Proven over the real
+// wire by wstest.
 
 import type { SimEvent } from './sim/types.ts'
 
@@ -18,8 +17,7 @@ export function newFeedCursor(): FeedCursor {
   return { seen: 0 }
 }
 
-/** The events this snapshot carries that the cursor has NOT yet delivered.
- * `eventSeq` = total events ever emitted, of which `events` is the tail. */
+/** The events this snapshot carries that the cursor has NOT yet delivered. */
 export function freshEvents(cursor: FeedCursor, events: SimEvent[], eventSeq: number): SimEvent[] {
   const unseen = Math.max(0, Math.min(events.length, eventSeq - cursor.seen))
   cursor.seen = Math.max(cursor.seen, eventSeq)
@@ -28,42 +26,36 @@ export function freshEvents(cursor: FeedCursor, events: SimEvent[], eventSeq: nu
 
 // ── Human wording (the board's voice; the phone reuses it) ───────────────────
 
-const PHASE_LINES: Record<string, string> = {
-  round1: '🎬 ROUND 1 — NAIVE. No oracle exists. Arm and pray.',
-  intermission: '⏸ INTERMISSION — the world is frozen. Stock your hand.',
-  round2: '🔮 ROUND 2 — VERIFIED. The oracle is online. Same world, second chance.',
-  reveal: '🏁 THE REVEAL — round 1 vs round 2. The delta tells the story.',
-}
-
 export function describeEvent(e: SimEvent, nameOf: (i: number) => string): string {
   switch (e.t) {
-    case 'drafted': return `${nameOf(e.player)} accepted a ${e.tier} draft (${e.id})`
-    case 'draftRequested': return `🤖 ${nameOf(e.player)} asked the apprentice for a ${e.tier} draft…`
-    case 'draftFailed': return `🤯 ${nameOf(e.player)}'s apprentice returned gibberish — ${e.refund}⚡ refunded`
-    case 'oracle': return `${nameOf(e.player)} consulted the oracle on ${e.id}: ${e.ok ? 'GREEN ✓' : 'RED ✗'}`
-    case 'armed': return e.yolo ? `⚠ ${nameOf(e.player)} YOLO-ARMED ${e.id} — no oracle, no mercy!` : `${nameOf(e.player)} armed ${e.id} (verified)`
-    case 'disarmed': return `${nameOf(e.player)} disarmed ${e.id}`
-    case 'autoDisarm': return `🔌 the oracle BENCHED ${nameOf(e.player)}'s ${e.id}: ${e.reason}`
-    case 'misfire': return `💀 ${nameOf(e.player)}'s ${e.id} MISFIRED: ${e.reason}`
-    case 'blowup': return `🔥 ${nameOf(e.player)}'s boost ${e.id} BLEW UP`
-    case 'gremlinSpike': return `👹 GREMLIN SPIKE (pressure ${e.pressure}) — damage ${e.damage.join(' / ')}`
-    case 'corrupted': return `🪳 a gremlin chewed on ${nameOf(e.player)}'s ${e.id}…`
-    case 'marketShift': return `📈 market now pays ${e.market} per widget`
-    case 'charmShift': return `🧿 charms now fetch ${e.market} at the stall`
-    case 'veinSpawned': return `⛏ a NEW VEIN surfaced — vein #${e.id} (rate ${e.rate}, ${e.reserve} matter)`
-    case 'veinExhausted': return `🪨 vein #${e.id} ran DRY — harvesters there are idling`
-    case 'prospected': return `🔭 ${nameOf(e.player)} surveyed the field — the next vein's secret is theirs`
-    case 'contractOffered': return `📜 NEW CONTRACT #${e.id}: deliver ${e.qty} ${e.good} → +${e.bonus} — claim it on your phone`
-    case 'contractClaimed': return `📜 ${nameOf(e.player)} claimed contract #${e.id}`
-    case 'contractFulfilled': return `📦 ${nameOf(e.player)} DELIVERED contract #${e.id} (+${e.bonus})`
-    case 'contractFailed': return `📜💥 ${nameOf(e.player)} blew contract #${e.id} (−${e.penalty})`
-    case 'contractExpired': return `📜 contract #${e.id} expired unclaimed`
-    case 'scrapped': return `🗑 ${nameOf(e.player)} scrapped ${e.id}`
-    case 'phase': return PHASE_LINES[e.phase] ?? `phase: ${e.phase}`
+    case 'joined': return `🏕 ${e.name} claimed district #${e.district + 1} — welcome to the settlement`
+    case 'deployed':
+      return e.scope === 'shared'
+        ? `🟢 ${nameOf(e.dyad)} deployed ${e.name} to the SHARED works (oracle-green)`
+        : `${nameOf(e.dyad)} deployed ${e.name} in their district${e.verified ? ' (verified)' : ' — unverified, their rubble'}`
+    case 'undeployed': return `${nameOf(e.dyad)} pulled ${e.id} back to the bench`
+    case 'oracle': return `${nameOf(e.dyad)} ran the oracle on ${e.id}: ${e.ok ? 'GREEN ✓' : 'RED ✗'}`
+    case 'gateRefused': return `🚧 THE GATE held: ${nameOf(e.dyad)}'s ${e.id} tried to touch shared works unverified`
+    case 'scriptError': return `💥 ${nameOf(e.dyad)}'s ${e.id} crashed: ${e.reason}`
+    case 'scriptKilled': return `🌪💀 the storm TORE APART ${nameOf(e.dyad)}'s unverified ${e.id}`
+    case 'stormWarning': return `🌩 STORM ${e.index} in ${e.inTicks} ticks — severity ${e.severity}. Walls up.`
+    case 'stormLanded': return `🌪 STORM ${e.index} hit at ${e.severity} — the wall absorbed ${e.absorbed}${e.damage.some((x) => x > 0) ? `, districts took ${e.damage.join(' / ')}` : ' — NOTHING got through'}`
+    case 'contributed': return `🧱 ${nameOf(e.dyad)} landed ${e.amount} part${e.amount === 1 ? '' : 's'} on the ${e.structure}`
+    case 'milestone': return `🎉 MILESTONE: the ${e.structure.toUpperCase()} stands — the settlement grows`
+    case 'survivorArrived': return `🧍 a survivor reached the beacon — ${e.survivors} sheltering (script capacity ${e.capacity})`
+    case 'veinSpawned': return `⛏ a NEW VEIN surfaced — vein #${e.id} (rate ${e.rate}, ${e.reserve} ore)`
+    case 'veinExhausted': return `🪨 vein #${e.id} ran DRY — miners there are idling`
+    case 'voteCast': return e.go ? `🚀 ${nameOf(e.dyad)} votes GO` : `🛑 ${nameOf(e.dyad)} votes NO-GO`
+    case 'launch': return `🚀🚀🚀 LAUNCH — ${e.goVotes} of ${e.dyads} dyads said GO. The ark rises.`
   }
 }
 
-/** The disaster theater shows these big; everything else is a footnote. */
+/** The board shows these big; everything else is a footnote. */
 export function isDisaster(e: SimEvent): boolean {
-  return e.t === 'misfire' || e.t === 'blowup' || e.t === 'corrupted' || e.t === 'gremlinSpike' || e.t === 'draftFailed' || e.t === 'contractFailed'
+  return e.t === 'stormLanded' || e.t === 'scriptKilled' || e.t === 'scriptError' || e.t === 'gateRefused'
+}
+
+/** The board celebrates these. */
+export function isTriumph(e: SimEvent): boolean {
+  return e.t === 'milestone' || e.t === 'launch' || e.t === 'survivorArrived'
 }

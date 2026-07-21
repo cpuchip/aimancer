@@ -1,37 +1,33 @@
-// Over-the-wire oracle — spawns the REAL server entry (tsx server/index.ts)
-// and plays it through websockets + HTTP like a browser/agent would.
-// Run: npm run wstest. Harness adapted from chips server/wstest.ts (TestClient,
-// taskkill teardown, assertRedacted discipline).
+// Over-the-wire oracle — ARK PIVOT. Spawns the REAL server entry (tsx
+// server/index.ts) with the REAL Go engine binary and plays it through
+// websockets + HTTP like a browser/agent would. Run: npm run wstest.
+// Harness adapted from chips server/wstest.ts (TestClient, taskkill teardown,
+// assertRedacted discipline).
 //
-// Covers: room create (PIN alphabet), join, host-hinge start, the TWO-TOKEN
-// SEAT SPLIT (a worker token's arm attempt MUST be rejected — ws and HTTP),
-// drafts, oracle reports, tick auto-advance, reconnect-by-key with stable
-// tokens, the ASYNC APPRENTICE round-trip against a hermetic fake OpenAI
-// endpoint (debit-now, drafts-arrive-later, fenced-JSON tolerance, gibberish
-// fallback, timeout+refund), the FULL HTTP action mirror (oracle/disarm/
-// scrap/draft-request — token rules + 409 sim refusals), the D4 HTTP ROOM
-// LIFECYCLE (create/join/reconnect-by-key/start/phase + the agent paste-prompt
-// — a full create→join→draft→oracle→arm→state loop with no websocket at all),
-// practice mode on a second unconfigured server, and the REDACTION AUDIT:
-// other players' hands and ALL auth tokens never cross the wire to the wrong
-// seat.
+// Covers: settlement create/join (PIN alphabet), CONTINUOUS play (no start
+// step — the world ticks as soon as a dyad sits), DROP-IN join mid-game,
+// reconnect-by-key with stable tokens, THE DEPLOY GATE over the wire
+// (unverified shared deploy → 409 + oracle report; district YOLO lands),
+// ENGINE INTEGRATION on the real path (a deployed template gathers real ore;
+// KV memory round-trips through the subprocess; a syntax error surfaces as an
+// error value), the paid oracle endpoint, the LAUNCH VOTE token split (worker
+// vote → 403; launch host-only), the agent paste-prompt (worker-only, no
+// hinge token, no bypass instruction), REPLAY determinism from GET /log, and
+// the REDACTION AUDIT: other seats' script SOURCE and ALL auth tokens never
+// cross the wire to the wrong seat.
 
-import { spawn } from 'node:child_process'
-import { createServer } from 'node:http'
-import type { Socket } from 'node:net'
+import { spawn, spawnSync } from 'node:child_process'
+import { mkdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import WebSocket from 'ws'
-import { freshEvents, newFeedCursor } from '../shared/eventFeed.ts'
-import { CODE_ALPHABET, ROUND2_TICKS_DEFAULT, seedFromCode } from '../shared/mpConfig.ts'
-import { DRAFT_COST_CHEAP, DRAFT_COST_SMART, ORACLE_COST, TOKEN_START } from '../shared/sim/balance.ts'
-import { staticCheck } from '../shared/sim/oracle.ts'
-import { apply, newGame, score, tick, ticksRunning } from '../shared/sim/sim.ts'
-import type { Command, SimEvent } from '../shared/sim/types.ts'
+import { CODE_ALPHABET } from '../shared/mpConfig.ts'
+import { ORACLE_COST, TOKEN_START } from '../shared/sim/balance.ts'
+import { replay, stateHash } from '../shared/sim/sim.ts'
+import type { Command } from '../shared/sim/types.ts'
 import type { ClientMessage, RoomLogView, RoomView, ServerMessage } from '../shared/protocol.ts'
 
 const PORT = 18643
 const BASE = `http://localhost:${PORT}`
-const PRACTICE_PORT = 18644
-const FAKE_LLM_PORT = 18645
 
 let passed = 0
 let failed = 0
@@ -61,8 +57,6 @@ class TestClient {
   constructor(public key: string, name: string) {
     this.name = name
     this.ws = new WebSocket(`ws://localhost:${PORT}/ws`)
-    // Attach ALL listeners synchronously with construction — an await between
-    // construction and listener setup loses events that already fired.
     this.opened = new Promise<void>((res, rej) => {
       this.ws.once('open', () => res())
       this.ws.once('error', rej)
@@ -93,10 +87,9 @@ class TestClient {
   }
 
   async waitFor(pred: (m: ServerMessage) => boolean, what: string, ms = 8000): Promise<ServerMessage> {
-    const scan = () => this.queue.find(pred)
     const start = Date.now()
     for (;;) {
-      const hit = scan()
+      const hit = this.queue.find(pred)
       if (hit) return hit
       if (Date.now() - start > ms) throw new Error(`timeout waiting for ${what} (${this.name})`)
       await new Promise<void>((res) => {
@@ -109,7 +102,7 @@ class TestClient {
     }
   }
 
-  async waitView(pred: (v: RoomView) => boolean, what: string, ms = 8000): Promise<RoomView> {
+  async waitView(pred: (v: RoomView) => boolean, what: string, ms = 10000): Promise<RoomView> {
     const start = Date.now()
     for (;;) {
       if (this.view && pred(this.view)) return this.view
@@ -129,48 +122,9 @@ class TestClient {
   }
 }
 
-/** Hermetic fake OpenAI-compatible endpoint. The player's ORDER text (which
- * rides the user message) selects the behavior: HANG never answers (timeout
- * path), GARBAGE answers in prose (organic-fallback path), FENCED wraps the
- * JSON in a markdown fence (tolerance path); default = 2 clean drafts. */
-function startFakeLLM(): { close: () => void } {
-  const hung = new Set<Socket>()
-  const srv = createServer((req, res) => {
-    let body = ''
-    req.on('data', (c) => (body += c))
-    req.on('end', () => {
-      const reply = (content: string) => {
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ id: 'fake', choices: [{ message: { role: 'assistant', content } }] }))
-      }
-      if (body.includes('HANG')) {
-        hung.add(req.socket) // never respond — the room must refund on timeout
-        return
-      }
-      if (body.includes('GARBAGE')) return reply('You should really harvest more, boss! Trust me.')
-      if (body.includes('FENCED')) return reply('Here you go:\n```json\n[{"verb":"refine","params":{"rate":1}}]\n```\nEnjoy!')
-      return reply(
-        JSON.stringify([
-          { verb: 'harvest', params: { rate: 2, node: 1 } },
-          { verb: 'sell', params: { amount: 2 }, when: { field: 'widgets', op: '>', value: 0 } },
-        ]),
-      )
-    })
-  })
-  srv.listen(FAKE_LLM_PORT)
-  return {
-    close: () => {
-      for (const s of hung) s.destroy()
-      srv.close()
-    },
-  }
-}
-
 function spawnGame(port: number, extraEnv: Record<string, string>): ReturnType<typeof spawn> {
   return spawn('npx', ['tsx', 'server/index.ts'], {
     env: { ...process.env, PORT: String(port), ...extraEnv },
-    // stderr must be 'pipe', not 'inherit': an inherited fd ties our pipeline
-    // to the child's lifetime (chips' lesson).
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: process.platform === 'win32',
   })
@@ -190,8 +144,6 @@ async function awaitBoot(server: ReturnType<typeof spawn>): Promise<void> {
 }
 
 async function killGame(server: ReturnType<typeof spawn>): Promise<void> {
-  // Windows: kill() only reaches the cmd.exe shell wrapper — taskkill /T
-  // takes the real node process down with it. AWAIT it (chips' lesson).
   if (process.platform === 'win32' && server.pid) {
     await new Promise<void>((res) => {
       const k = spawn('taskkill', ['/pid', String(server.pid), '/T', '/F'], { shell: true })
@@ -204,842 +156,243 @@ async function killGame(server: ReturnType<typeof spawn>): Promise<void> {
   }
 }
 
-async function main(): Promise<void> {
-  const fakeLLM = startFakeLLM()
-  // the MAIN server gets the fake apprentice endpoint (live mode) with a short
-  // timeout so the HANG test resolves inside the suite
-  const server = spawnGame(PORT, {
-    APPRENTICE_BASE_URL: `http://localhost:${FAKE_LLM_PORT}/v1`,
-    APPRENTICE_MODEL_CHEAP: 'fake-cheap',
-    APPRENTICE_MODEL_SMART: 'fake-smart',
-    APPRENTICE_TIMEOUT_MS: '1500',
-    // fast auto-advance so the real path runs inside the suite (defaults 8s/20s)
-    AUTO_ADVANCE_MS: '1200',
-    AUTO_DWELL_MS: '600',
+/** Build the REAL engine from the sibling checkout — the integration floor
+ * runs against the actual subprocess, never a stub. */
+function buildEngine(): string {
+  const goDir = process.env.AIMANCER_GO_DIR || resolve(process.cwd(), '..', 'aimancer-go')
+  const cacheDir = resolve(process.cwd(), 'node_modules', '.cache')
+  mkdirSync(cacheDir, { recursive: true })
+  const bin = join(cacheDir, process.platform === 'win32' ? 'aimancer-engine-wstest.exe' : 'aimancer-engine-wstest')
+  const r = spawnSync('go', ['build', '-o', bin, './cmd/aimancer-engine'], { cwd: goDir, stdio: 'pipe', shell: process.platform === 'win32' })
+  if (r.status !== 0) throw new Error(`engine build failed: ${r.stderr?.toString()}`)
+  return bin
+}
+
+async function api(path: string, opts: { method?: string; token?: string; body?: unknown } = {}): Promise<{ status: number; json: Record<string, unknown> }> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
+    headers: {
+      ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
+      ...(opts.body !== undefined ? { 'content-type': 'application/json' } : {}),
+    },
+    ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
   })
-  let practiceServer: ReturnType<typeof spawn> | null = null
+  return { status: res.status, json: (await res.json()) as Record<string, unknown> }
+}
+
+const MINER_SRC = `best = None
+for v in world["veins"]:
+    if v["reserve"] > 0 and (best == None or v["rate"] > best["rate"]):
+        best = v
+if best != None:
+    act("gather", node=best["id"], rate=best["rate"])
+`
+
+const KV_SRC = `n = recall("n", 0) + 1
+remember("n", n)
+print("kvtick", n)
+act("farm", rate=1)
+`
+
+async function main(): Promise<void> {
+  console.log('building the real engine…')
+  const engineBin = buildEngine()
+  const server = spawnGame(PORT, { AIMANCER_ENGINE_BIN: engineBin })
   server.stderr!.on('data', (d: Buffer) => process.stderr.write(d))
   await awaitBoot(server)
 
   try {
-    // ── HTTP surface: the deploy oracles ─────────────────────────────────────
-    const health = await (await fetch(`${BASE}/healthz`)).text()
-    ok(health === 'ok', '/healthz')
+    // ── deploy oracles + public reference ────────────────────────────────────
+    ok((await (await fetch(`${BASE}/healthz`)).text()) === 'ok', '/healthz')
     const version = await (await fetch(`${BASE}/version`)).text()
     ok(version.length > 0, `/version (${version})`)
-
-    // ── GET /api/rules: the public rules — one truth for humans AND agents ───
     const rulesRes = await fetch(`${BASE}/api/rules`)
     const rulesText = await rulesRes.text()
-    ok(rulesRes.status === 200 && (rulesRes.headers.get('content-type') ?? '').startsWith('text/plain'), 'GET /api/rules → 200 text/plain, NO auth required (rules are public)')
-    ok(rulesText.includes('| `harvest` |') && rulesText.includes('| `boost` |'), '/api/rules carries the verb table')
-    ok(rulesText.includes('/api/room/:pin/arm') && rulesText.includes('HTTP API quick reference'), '/api/rules carries the API quick reference')
-    ok(!/\b[wh]_[A-Za-z0-9]{6,}/.test(rulesText), '/api/rules carries no token material')
+    ok(rulesRes.status === 200 && (rulesRes.headers.get('content-type') ?? '').startsWith('text/plain'), 'GET /api/rules → 200 text/plain, NO auth (rules are public)')
+    ok(rulesText.includes('deploy gate') && rulesText.includes('GO/NO-GO'), '/api/rules carries the ark game')
+    ok(rulesText.includes('gather') && rulesText.includes('contribute'), '/api/rules carries the action table')
+    ok(!/\b[wh]_[A-Za-z0-9_-]{8,}/.test(rulesText), '/api/rules carries no token material')
     ok((await fetch(`${BASE}/api/rules`, { method: 'POST' })).status === 405, 'POST /api/rules → 405')
+    const tpl = await api('/api/templates')
+    const templates = tpl.json['templates'] as Array<{ id: string; scope: string; source: string }>
+    ok(tpl.status === 200 && templates.length >= 4, 'GET /api/templates → the agentless floor')
+    ok(templates.some((t) => t.scope === 'shared') && templates.some((t) => t.scope === 'district'), 'templates cover both scopes')
 
-    // ── Room create + join ───────────────────────────────────────────────────
+    // ── ws create/join: continuous from the first seat ───────────────────────
     const alice = new TestClient('key-alice', 'Alice')
     await alice.open('') // empty PIN = create
     await alice.waitFor((m) => m.type === 'welcome', 'alice welcome')
-    const pin = alice.welcome!.room
-    ok(new RegExp(`^[${CODE_ALPHABET}]{4}$`).test(pin), `4-letter PIN from the no-I/O alphabet (${pin})`)
-    ok(alice.welcome!.isHost && alice.welcome!.index === 0, 'creator seated as host')
+    const wsPin = alice.welcome!.room
+    ok(new RegExp(`^[${CODE_ALPHABET}]{4}$`).test(wsPin), `4-letter PIN from the no-I/O alphabet (${wsPin})`)
+    ok(alice.welcome!.isHost && alice.welcome!.index === 0, 'creator seated as host (seat 0)')
     ok(alice.welcome!.workerToken.startsWith('w_') && alice.welcome!.hingeToken.startsWith('h_'), 'seat issued BOTH tokens: worker + hinge')
+    const v0 = await alice.waitView((v) => v.dyads.length === 1, 'first snapshot')
+    ok(v0.storm.inTicks > 0 && v0.storm.severity > 0, 'the storm countdown is live from the first snapshot')
+    ok(v0.frontier === 'wall', 'the milestone frontier starts at the wall')
+    ok(v0.engine !== null && typeof v0.engine.version === 'string', `engine identity pinned in the view (${v0.engine?.engine} ${v0.engine?.version})`)
+    alice.close()
 
-    const bob = new TestClient('key-bob', 'Bob')
-    await bob.open(pin)
-    await bob.waitFor((m) => m.type === 'welcome', 'bob welcome')
-    ok(bob.welcome!.index === 1 && !bob.welcome!.isHost, 'bob got seat 1')
-    ok(bob.welcome!.workerToken !== alice.welcome!.workerToken, 'tokens are per-seat')
+    // ── HTTP room lifecycle (agents need no websocket at all) ────────────────
+    const created = await api('/api/room', { body: { name: 'Host', tickMs: 300 } })
+    ok(created.status === 200 && created.json['ok'] === true, 'POST /api/room creates + seats the host')
+    const pin = created.json['pin'] as string
+    const host = { worker: created.json['workerToken'] as string, hinge: created.json['hingeToken'] as string, key: created.json['key'] as string }
+    ok(typeof host.worker === 'string' && typeof host.hinge === 'string', 'HTTP create returns both tokens')
 
-    const ghost = new TestClient('key-ghost', 'Ghost')
-    await ghost.open('ZZZZ')
-    await ghost.waitFor((m) => m.type === 'error', 'bad pin rejected')
-    ok(ghost.errs.some((e) => e.includes('ZZZZ')), 'joining a nonexistent PIN errors')
-    ghost.close()
+    const joined = await api(`/api/room/${pin}/join`, { body: { name: 'Bea' } })
+    ok(joined.status === 200 && joined.json['seat'] === 1, 'HTTP drop-in join gets seat 1')
+    const bea = { worker: joined.json['workerToken'] as string, hinge: joined.json['hingeToken'] as string, key: joined.json['key'] as string }
 
-    // ── Start: host + hinge only ─────────────────────────────────────────────
-    bob.send({ type: 'start', token: bob.welcome!.hingeToken })
-    await bob.waitFor((m) => m.type === 'error' && m.message.includes('host'), 'non-host start rejected')
-    ok(true, 'only the host starts')
-    alice.send({ type: 'start', token: alice.welcome!.workerToken })
-    await alice.waitFor((m) => m.type === 'error' && m.message.includes('hinge'), 'worker start rejected')
-    ok(true, 'starting is a hinge act — worker token rejected')
-    // 60s tick = the world holds still for this room, so every assertion below
-    // is deterministic (no gremlin spike can disturb the fixture mid-test).
-    // A second room further down proves the auto-tick loop.
-    alice.send({ type: 'start', token: alice.welcome!.hingeToken, tickMs: 60000, autoAdvance: false })
-    await alice.waitView((v) => v.started, 'game started')
-    ok(alice.view!.tickMs === 60000, 'tick length is a room setting')
-    ok(alice.view!.players.length === 2, 'two workshops in the world')
-    ok(alice.view!.phase === 'round1', 'the game opens in ROUND 1 — naive')
-    ok(alice.view!.ticksRemaining === 12, 'round-1 countdown starts at the default budget (12)')
+    const re = await api(`/api/room/${pin}/join`, { body: { name: 'Bea', key: bea.key } })
+    ok(re.status === 200 && re.json['rejoined'] === true && re.json['workerToken'] === bea.worker && re.json['hingeToken'] === bea.hinge, 'reconnect-by-key returns the SAME seat + tokens')
 
-    // ── Draft: worker surface only. 31337 is Bob's secret marker. ────────────
-    const SECRET = 31337
-    bob.send({
-      type: 'draft',
-      token: bob.welcome!.hingeToken,
-      script: { id: 'bob-s1', verb: 'harvest', params: { rate: 2, node: 1 } },
-      tier: 'cheap',
-    })
-    await bob.waitFor((m) => m.type === 'error' && m.message.includes('worker'), 'hinge draft rejected')
-    ok(true, 'drafts come from the worker surface — hinge token rejected')
-    bob.send({
-      type: 'draft',
-      token: bob.welcome!.workerToken,
-      script: { id: 'bob-s1', verb: 'harvest', params: { rate: 2, node: 1 }, when: { field: 'matter', op: '<', value: SECRET } },
-      tier: 'cheap',
-    })
-    await bob.waitView((v) => (v.you?.hand.length ?? 0) === 1, 'draft landed in the hand')
-    ok(bob.view!.you!.hand[0].script.params['rate'] === 2, "bob's own snapshot carries his full script body")
-    ok(!bob.view!.you!.hand[0].armed, 'a draft enters the queue unarmed')
+    // ── THE DEPLOY GATE over the wire ────────────────────────────────────────
+    const yolo = await api(`/api/room/${pin}/deploy`, { token: host.worker, body: { id: 'crash', scope: 'district', source: 'this is not starlark' } })
+    ok(yolo.status === 200 && yolo.json['verified'] === false, 'district deploy lands UNVERIFIED — YOLO allowed, your rubble')
 
-    // ── THE HINGE TEST: a worker token's arm attempt is REJECTED ─────────────
-    bob.send({ type: 'arm', token: bob.welcome!.workerToken, id: 'bob-s1' })
-    await bob.waitFor((m) => m.type === 'error' && m.message.includes('hinge'), 'worker arm rejected')
-    ok(true, 'WORKER token arm attempt REJECTED server-side (the hinge holds)')
-    ok(bob.view!.you!.hand[0].armed === false, 'and the script stayed unarmed')
-    bob.send({ type: 'arm', token: bob.welcome!.hingeToken, id: 'bob-s1' })
-    await bob.waitView((v) => v.you!.hand[0].armed === true, 'hinge arm landed')
-    ok(bob.view!.you!.hand[0].yolo === true, 'armed without an oracle pass = YOLO (public)')
+    const gated = await api(`/api/room/${pin}/deploy`, { token: host.worker, body: { id: 'evil', scope: 'shared', source: 'act("blastoff")' } })
+    ok(gated.status === 409, 'THE GATE: red shared deploy → 409')
+    const gr = gated.json['report'] as { ok: boolean; reasons: string[] } | undefined
+    ok(gr !== undefined && gr.ok === false && gr.reasons.some((x) => x.includes('unknown action')), 'THE GATE: the 409 carries the full oracle report')
 
-    // alice cannot reach into bob's workshop even with her hinge
-    alice.send({ type: 'arm', token: alice.welcome!.hingeToken, id: 'bob-s1' })
-    await alice.waitFor((m) => m.type === 'error' && m.message.includes('no script'), 'cross-seat arm rejected')
-    ok(true, 'a hinge only arms its OWN workshop')
+    const compileRed = await api(`/api/room/${pin}/deploy`, { token: host.worker, body: { id: 'bad2', scope: 'shared', source: 'not even close' } })
+    ok(compileRed.status === 409 && String((compileRed.json['report'] as { reasons: string[] }).reasons[0]).includes('compile'), 'THE GATE: a compile error is red with the backtrace')
 
-    // ── ROUND 1 IS NAIVE: the oracle is refused BY THE SIM over the wire ─────
-    bob.send({ type: 'oracle', token: bob.welcome!.workerToken, id: 'bob-s1' })
-    await bob.waitFor((m) => m.type === 'error' && m.message.includes("hasn't been invented"), 'round-1 oracle refused')
-    ok(true, "round-1 oracleCheck REFUSED by the sim, in plain words (\"the oracle hasn't been invented yet\")")
-    ok(bob.reports.length === 0, 'and no oracle report crossed the wire')
+    const builder = await api(`/api/room/${pin}/deploy`, { token: host.worker, body: { id: 'builder', scope: 'shared', source: 'act("contribute", structure="wall", amount=1)' } })
+    ok(builder.status === 200 && builder.json['verified'] === true, 'green shared deploy lands VERIFIED through the gate')
+    const br = builder.json['report'] as { ok: boolean; actions: unknown[] }
+    ok(br.ok && br.actions.length === 1, 'the deploy report shows the dry-run actions')
 
-    // alice stocks a draft with HER secret marker (log-redaction fixture)
-    const ALICE_SECRET = 424242
-    alice.send({
-      type: 'draft',
-      token: alice.welcome!.workerToken,
-      script: { id: 'alice-s1', verb: 'sell', params: { amount: 2 }, when: { field: 'widgets', op: '>', value: ALICE_SECRET } },
-      tier: 'smart',
-    })
-    await alice.waitView((v) => (v.you?.hand.length ?? 0) === 1, "alice's draft landed")
+    // ── ENGINE INTEGRATION on the real path: a template mines real ore ───────
+    const miner = await api(`/api/room/${pin}/deploy`, { token: bea.worker, body: { id: 'miner', scope: 'district', source: MINER_SRC } })
+    ok(miner.status === 200, 'the miner template deploys')
+    const kv = await api(`/api/room/${pin}/deploy`, { token: bea.worker, body: { id: 'kv', scope: 'district', source: KV_SRC } })
+    ok(kv.status === 200, 'the KV counter script deploys')
 
-    // ── The world ticks on its own + the ROUND BUDGET freezes it ─────────────
+    let mined: RoomView | null = null
+    for (let i = 0; i < 40; i++) {
+      const st = await api(`/api/room/${pin}/state`, { token: bea.worker })
+      const view = st.json['view'] as RoomView
+      if (view.dyads[1] && view.dyads[1].ore > 0 && view.tick >= 3) {
+        mined = view
+        break
+      }
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    ok(mined !== null, 'ENGINE INTEGRATION: the deployed script gathered REAL ore through the subprocess')
+    if (mined) {
+      const own = mined.you!.scripts.find((x) => x.id === 'miner')!
+      ok(own.lastTick !== null && own.lastTick.ran && own.lastTick.dOre > 0, 'per-tick yield recorded from the engine run')
+      ok(own.lastTick!.gasUsed > 0, 'gas metering visible')
+      const kvScript = mined.you!.scripts.find((x) => x.id === 'kv')!
+      const kvLogs = kvScript.lastTick?.logs ?? []
+      ok(kvLogs.some((l) => /kvtick [2-9]\d*/.test(l)), `KV MEMORY round-trips through the subprocess (logs: ${kvLogs.join(' | ')})`)
+      const crash = (await api(`/api/room/${pin}/state`, { token: host.worker })).json['view'] as RoomView
+      const crashScript = crash.you!.scripts.find((x) => x.id === 'crash')!
+      ok(crashScript.lastTick?.err !== null && (crashScript.lastTick?.err ?? '').includes('compile'), 'a YOLO syntax error surfaces as an error value, script survives as evidence')
+      ok(crashScript.errStreak >= 1, 'errStreak counts on the wire view')
+      // tokens actually debited for runs (regen-capped, so just sanity)
+      ok(mined.dyads[1].tokens <= 50, 'token economy live on the wire')
+    }
+
+    // ── the paid oracle endpoint ─────────────────────────────────────────────
+    const before = ((await api(`/api/room/${pin}/state`, { token: bea.worker })).json['view'] as RoomView).dyads[1].tokens
+    const check = await api(`/api/room/${pin}/oracle`, { token: bea.worker, body: { id: 'miner' } })
+    ok(check.status === 200 && (check.json['report'] as { ok: boolean }).ok === true, 'oracle check on a good script → green report')
+    const after = ((await api(`/api/room/${pin}/state`, { token: bea.worker })).json['view'] as RoomView)
+    ok(after.you!.scripts.find((x) => x.id === 'miner')!.verified === true, 'green oracle check flips verified (storm armor)')
+    ok(after.dyads[1].tokens <= before - ORACLE_COST + 10, 'oracle check debits ⚡')
+    const missing = await api(`/api/room/${pin}/oracle`, { token: bea.worker, body: { id: 'ghost' } })
+    ok(missing.status === 409, 'oracle on a missing script → 409')
+
+    // ── the LAUNCH VOTE token split (the hinge, structural) ──────────────────
+    const wVote = await api(`/api/room/${pin}/vote`, { token: host.worker, body: { go: true } })
+    ok(wVote.status === 403, 'VOTE with the worker token → 403 (no agent can vote, by construction)')
+    const hVote = await api(`/api/room/${pin}/vote`, { token: host.hinge, body: { go: true } })
+    ok(hVote.status === 409 && String(hVote.json['error']).includes('ark'), 'hinge vote reaches the sim — refused only because the ark is not built')
+    const beaLaunch = await api(`/api/room/${pin}/launch`, { token: bea.hinge, body: {} })
+    ok(beaLaunch.status === 403, 'launch by a non-host → 403')
+    const wLaunch = await api(`/api/room/${pin}/launch`, { token: host.worker, body: {} })
+    ok(wLaunch.status === 403, 'launch with the worker token → 403')
+    const hLaunch = await api(`/api/room/${pin}/launch`, { token: host.hinge, body: {} })
+    ok(hLaunch.status === 409, 'host launch reaches the sim — refused because the ark is not built')
+
+    // ── the agent paste-prompt: worker-only, hinge stays home ────────────────
+    const promptRes = await fetch(`${BASE}/api/room/${pin}/agent-prompt?token=${host.worker}`)
+    const promptText = await promptRes.text()
+    ok(promptRes.status === 200, 'agent-prompt with the worker token → 200')
+    ok(promptText.includes(host.worker), 'the prompt embeds the WORKER token')
+    ok(!promptText.includes(host.hinge), 'the prompt NEVER embeds the hinge token')
+    ok(promptText.toLowerCase().includes('starlark') && promptText.includes('deploy'), 'the prompt teaches the ark game')
+    ok(promptText.includes('Never bypass'), 'the prompt keeps the no-bypass covenant')
+    ok(!promptText.includes('/vote'), 'the prompt does not teach the vote endpoint')
+    ok((await fetch(`${BASE}/api/room/${pin}/agent-prompt?token=${host.hinge}`)).status === 403, 'agent-prompt with the hinge token → 403 (wrong surface)')
+
+    // ── DROP-IN mid-game over ws + the redaction audit ───────────────────────
     const carol = new TestClient('key-carol', 'Carol')
-    await carol.open('')
+    await carol.open(pin)
     await carol.waitFor((m) => m.type === 'welcome', 'carol welcome')
-    carol.send({ type: 'start', token: carol.welcome!.hingeToken, tickMs: 300, round1Ticks: 2, autoAdvance: false })
-    await carol.waitView((v) => v.tick >= 2, 'ticks advance')
-    ok(true, 'the room ticks the sim on its own cadence and pushes snapshots (auto-refresh proof)')
-    await new Promise((r) => setTimeout(r, 900)) // 3 tick intervals of silence
-    ok(carol.view!.tick === 2, `round-1 budget freezes the world at its cap (tick ${carol.view!.tick} of 2)`)
-    ok(carol.view!.ticksRemaining === 0, 'countdown reads 0 — waiting on the host')
-    // the host advances her solo room through the weave
-    carol.send({ type: 'phase', token: carol.welcome!.hingeToken, to: 'intermission' })
-    await carol.waitView((v) => v.phase === 'intermission', 'carol intermission')
-    ok(carol.view!.round1Summary !== null, 'intermission snapshot carries the round-1 summary')
-    carol.send({ type: 'phase', token: carol.welcome!.hingeToken, to: 'round2' })
-    await carol.waitView((v) => v.phase === 'round2', 'carol round2')
-    ok(carol.view!.ticksRemaining !== null && carol.view!.ticksRemaining <= ROUND2_TICKS_DEFAULT, `round-2 countdown runs its own budget (${carol.view!.ticksRemaining}/${ROUND2_TICKS_DEFAULT})`)
-    await carol.waitView((v) => v.phase === 'round2' && v.tick >= 1, 'round-2 ticks resume')
-    ok(true, 'a fresh round un-freezes the world')
+    ok(carol.welcome!.index === 2, 'ws drop-in mid-game gets the next district')
+    const cv = await carol.waitView((v) => v.dyads.length === 3, 'carol view')
+    ok(cv.tick > 0 && cv.dyads[2].district === 2, `drop-in landed in a RUNNING world (tick ${cv.tick})`)
+    await carol.waitView((v) => v.you !== null && v.tick >= cv.tick + 2, 'carol sees ticks advance')
+    const carolRaws = carol.snapshotRaws.join('\n')
+    ok(!carolRaws.includes(MINER_SRC.slice(0, 30)), "REDACTION: other seats' script SOURCE never crosses the wire")
+    ok(!carolRaws.includes(host.worker) && !carolRaws.includes(host.hinge) && !carolRaws.includes(bea.worker) && !carolRaws.includes(bea.hinge), 'REDACTION: no auth token ever appears in a snapshot')
+    ok(carolRaws.includes('"lastNote"') || carolRaws.includes('builder'), 'public script fates DO cross (existence, scope, notes)')
     carol.close()
 
-    // ── HTTP API: the BYO surface ────────────────────────────────────────────
-    const pub = await (await fetch(`${BASE}/api/room/${pin}/state`)).json()
-    ok(pub.ok && pub.view.you === null, 'public state has NO hand (you: null)')
-    const mine = await (await fetch(`${BASE}/api/room/${pin}/state`, { headers: { authorization: `Bearer ${bob.welcome!.workerToken}` } })).json()
-    ok(mine.ok && mine.view.you?.hand.some((sl: { script: { id: string } }) => sl.script.id === 'bob-s1'), 'worker-token state shows your own hand')
+    // ── GET /log: the replay artifact, redacted + replayable ─────────────────
+    const beaLog = (await api(`/api/room/${pin}/log`, { token: bea.worker })).json as unknown as RoomLogView & { ok: boolean }
+    ok(beaLog.engine !== null && typeof beaLog.engine!.version === 'string', 'the replay header pins the engine identity')
+    const beaDeploys = beaLog.log.filter((e) => e.cmd['t'] === 'deploy')
+    const foreign = beaDeploys.filter((e) => e.cmd['player'] !== 1)
+    ok(foreign.length > 0 && foreign.every((e) => e.cmd['source'] === '[redacted until launch]'), "REDACTION: other seats' deploy source is stripped from /log until launch")
+    ok(beaDeploys.some((e) => e.cmd['player'] === 1 && e.cmd['source'] === MINER_SRC), 'your own deploy source IS yours to read')
 
-    const draftDenied = await fetch(`${BASE}/api/room/${pin}/draft`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${bob.welcome!.hingeToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ script: { id: 'bob-s2', verb: 'harvest', params: { rate: 1, node: 1 } }, tier: 'cheap' }),
-    })
-    ok(draftDenied.status === 403, 'HTTP draft with hinge token → 403 (role tagging both ways)')
-    const draftOk = await fetch(`${BASE}/api/room/${pin}/draft`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${bob.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ script: { id: 'bob-s2', verb: 'harvest', params: { rate: 1, node: 1 } }, tier: 'cheap' }),
-    })
-    ok(draftOk.status === 200, 'HTTP draft with worker token lands')
-
-    const armDenied = await fetch(`${BASE}/api/room/${pin}/arm`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${bob.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'bob-s2' }),
-    })
-    ok(armDenied.status === 403, 'HTTP arm with WORKER token → 403 (the hinge holds over HTTP too)')
-    const s2Check = await (await fetch(`${BASE}/api/room/${pin}/state`, { headers: { authorization: `Bearer ${bob.welcome!.workerToken}` } })).json()
-    const s2 = s2Check.view.you.hand.find((sl: { script: { id: string } }) => sl.script.id === 'bob-s2')
-    ok(s2 && s2.armed === false, 'and bob-s2 stayed unarmed')
-    const armOk = await fetch(`${BASE}/api/room/${pin}/arm`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${bob.welcome!.hingeToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'bob-s2' }),
-    })
-    ok(armOk.status === 200, 'HTTP arm with hinge token lands')
-    const noToken = await fetch(`${BASE}/api/room/${pin}/arm`, { method: 'POST', body: '{"id":"bob-s2"}' })
-    ok(noToken.status === 401, 'HTTP arm with no token → 401')
-
-    // ── Spectator (the big screen) ───────────────────────────────────────────
-    const board = new TestClient('key-board', 'Board')
-    await board.open(pin, true)
-    await board.waitView((v) => v.started, 'board snapshot')
-    ok(board.view!.you === null, 'a watcher gets NO hand')
-    ok(board.view!.players[1].scripts.some((sc) => sc.id === 'bob-s1' && sc.armed), 'the board sees script fates (id/armed/yolo), not bodies')
-
-    // ── Reconnect by localStorage key: same seat, SAME tokens ────────────────
-    bob.close()
-    await new Promise((r) => setTimeout(r, 300))
-    const bob2 = new TestClient('key-bob', 'Bob')
-    await bob2.open(pin)
-    await bob2.waitFor((m) => m.type === 'welcome', 'bob rejoined')
-    ok(bob2.welcome!.index === 1, 'rejoined the same seat')
-    ok(bob2.welcome!.workerToken === bob.welcome!.workerToken && bob2.welcome!.hingeToken === bob.welcome!.hingeToken, 'reconnect reissues the SAME tokens (agents keep working)')
-    await bob2.waitView((v) => (v.you?.hand.length ?? 0) === 2, 'hand intact after rejoin')
-    ok(true, 'live state resumed after reconnect')
-
-    // ── THE WEAVE over the wire: host-controlled phase advance ───────────────
-    bob2.send({ type: 'phase', token: bob2.welcome!.hingeToken, to: 'intermission' })
-    await bob2.waitFor((m) => m.type === 'error' && m.message.includes('host'), 'non-host phase rejected')
-    ok(true, 'only the host advances the round')
-    alice.send({ type: 'phase', token: alice.welcome!.workerToken, to: 'intermission' })
-    await alice.waitFor((m) => m.type === 'error' && m.message.includes('human'), 'worker phase rejected')
-    ok(true, 'advancing the round is a human act — worker token rejected')
-    alice.send({ type: 'phase', token: alice.welcome!.hingeToken, to: 'round2' })
-    await alice.waitFor((m) => m.type === 'error' && m.message.includes('intermission'), 'skip rejected')
-    ok(true, 'phases advance strictly in order (no skipping to round 2)')
-
-    alice.send({ type: 'phase', token: alice.welcome!.hingeToken, to: 'intermission' })
-    await bob2.waitView((v) => v.phase === 'intermission', 'intermission snapshot')
-    ok(bob2.view!.round1Summary !== null, 'the round-1 summary rides every snapshot from intermission on (the teaching backdrop)')
-
-    // intermission: frozen, but the hand can be stocked
-    bob2.send({
-      type: 'draft',
-      token: bob2.welcome!.workerToken,
-      script: { id: 'bob-s3', verb: 'harvest', params: { rate: 2, node: 1 } },
-      tier: 'cheap',
-    })
-    await bob2.waitView((v) => (v.you?.hand.length ?? 0) === 3, 'intermission draft stocks the hand')
-    ok(true, 'drafting during intermission works (stock your hand for round 2)')
-    bob2.send({ type: 'arm', token: bob2.welcome!.hingeToken, id: 'bob-s3' })
-    await bob2.waitFor((m) => m.type === 'error' && m.message.includes('frozen'), 'intermission arm rejected')
-    ok(true, 'arming is refused while the world is frozen')
-
-    // ── GET /api/room/:pin/log — the replay feed, redacted per token ─────────
-    async function fetchLog(token?: string): Promise<{ ok: boolean; logStr: string; body: RoomLogView }> {
-      const r = await fetch(`${BASE}/api/room/${pin}/log`, token ? { headers: { authorization: `Bearer ${token}` } } : undefined)
-      const body = (await r.json()) as RoomLogView & { ok: boolean }
-      // leak checks scan the ENTRIES only — the seed field is a number that
-      // could coincidentally contain the marker digits
-      return { ok: body.ok, logStr: JSON.stringify(body.log), body }
-    }
-    function draftEntry(body: RoomLogView, id: string): Record<string, unknown> | undefined {
-      const hit = body.log.find((e) => {
-        const c = e.cmd as { t?: string; script?: { id?: string } }
-        return c.t === 'draftAccepted' && c.script?.id === id
-      })
-      return hit?.cmd as Record<string, unknown> | undefined
-    }
-    const pubLog = await fetchLog()
-    ok(pubLog.ok && pubLog.body.seed === seedFromCode(pin), 'log endpoint returns the seed (seed == seedFromCode(PIN))')
-    ok(pubLog.body.log.length > 0 && pubLog.body.phase === 'intermission', 'log carries the command entries + current phase')
-    ok(pubLog.body.log.some((e) => (e.cmd as { t?: string }).t === 'phase'), 'phase advances are IN the log (replays cross phases)')
-    const pubDraft = draftEntry(pubLog.body, 'bob-s1') as { script?: Record<string, unknown> } | undefined
-    ok(pubDraft !== undefined && pubDraft.script !== undefined && !('params' in pubDraft.script) && !('when' in pubDraft.script), 'tokenless log: draft bodies stripped to { id, verb }')
-    ok(!pubLog.logStr.includes(String(SECRET)) && !pubLog.logStr.includes(String(ALICE_SECRET)), 'tokenless log leaks NO script body from any seat')
-
-    const bobLog = await fetchLog(bob2.welcome!.workerToken)
-    ok(bobLog.logStr.includes(String(SECRET)), 'a seat token sees its OWN draft bodies in the log')
-    ok(!bobLog.logStr.includes(String(ALICE_SECRET)), "…and never another seat's (alice's params stripped)")
-
-    const hostEarlyLog = await fetchLog(alice.welcome!.hingeToken)
-    ok(!hostEarlyLog.logStr.includes(String(SECRET)), "the HOST token gets NO other-seat bodies BEFORE the reveal (bob's params still stripped)")
-
-    // ── Round 2: fresh world, same seed; stocked drafts carry ────────────────
-    alice.send({ type: 'phase', token: alice.welcome!.hingeToken, to: 'round2' })
-    await bob2.waitView((v) => v.phase === 'round2', 'round2 snapshot')
-    ok(bob2.view!.tick === 0 && bob2.view!.ticksRemaining === ROUND2_TICKS_DEFAULT, 'round 2 restarts the clock with its own budget')
-    ok(bob2.view!.you!.hand.length === 1 && bob2.view!.you!.hand[0].script.id === 'bob-s3', 'ONLY un-played drafts carry into round 2 (armed bob-s1/s2 are gone)')
-    ok(bob2.view!.players[1].tokens === TOKEN_START, 'resources reset to opening values — level playing field')
-
-    // the oracle exists now: verdict + 3-tick dry-run over the wire (either token)
-    bob2.send({ type: 'oracle', token: bob2.welcome!.workerToken, id: 'bob-s3' })
-    await bob2.waitFor((m) => m.type === 'oracleReport', 'oracle report')
-    const rep = bob2.reports[0]
-    ok(rep.report.ok && rep.report.prediction?.length === 3, 'round-2 oracle report carries the 3-tick dry-run')
-    bob2.send({ type: 'arm', token: bob2.welcome!.hingeToken, id: 'bob-s3' })
-    await bob2.waitView((v) => v.you!.hand[0].armed === true, 'verified arm landed')
-    ok(bob2.view!.you!.hand[0].yolo === false, 'an oracle-green arm is NOT a YOLO')
-
-    // D4 tightening: disarm joined arm on the human surface (ws too)
-    bob2.send({ type: 'disarm', token: bob2.welcome!.workerToken, id: 'bob-s3' })
-    await bob2.waitFor((m) => m.type === 'error' && m.message.includes('hinge'), 'worker disarm rejected')
-    ok(true, 'ws disarm with the WORKER token REJECTED (script-lifecycle control is a hinge act)')
-    ok(bob2.view!.you!.hand[0].armed === true, 'and the script stayed armed')
-
-    // ── Scrap over the wire ──────────────────────────────────────────────────
-    bob2.send({ type: 'scrap', token: bob2.welcome!.hingeToken, id: 'bob-s3' })
-    await bob2.waitFor((m) => m.type === 'error' && m.message.includes('disarm'), 'armed scrap rejected')
-    ok(true, 'an armed script cannot be scrapped (disarm first)')
-    bob2.send({
-      type: 'draft',
-      token: bob2.welcome!.workerToken,
-      script: { id: 'bob-s4', verb: 'refine', params: { rate: 1 } },
-      tier: 'cheap',
-    })
-    await bob2.waitView((v) => (v.you?.hand.length ?? 0) === 2, 'bob-s4 drafted')
-    bob2.send({ type: 'scrap', token: bob2.welcome!.workerToken, id: 'bob-s4' })
-    await bob2.waitView((v) => (v.you?.hand.length ?? 0) === 1, 'scrap landed')
-    ok(!bob2.view!.you!.hand.some((sl) => sl.script.id === 'bob-s4'), 'scrap frees the hand slot (worker surface may tidy)')
-
-    // ── The reveal: full stop + the delta table ──────────────────────────────
-    alice.send({ type: 'phase', token: alice.welcome!.hingeToken, to: 'reveal' })
-    await bob2.waitView((v) => v.phase === 'reveal', 'reveal snapshot')
-    const delta = bob2.view!.delta
-    ok(delta !== null && delta.players.length === 2, 'the reveal snapshot carries the round1-vs-round2 delta for every player')
-    ok(delta!.totals.score === delta!.totals.r2Score - delta!.totals.r1Score, 'aggregate delta is arithmetic, not vibes')
-    ok(bob2.view!.round2Summary !== null, 'round-2 summary present in reveal')
-    bob2.send({
-      type: 'draft',
-      token: bob2.welcome!.workerToken,
-      script: { id: 'late', verb: 'harvest', params: { rate: 1, node: 1 } },
-      tier: 'cheap',
-    })
-    await bob2.waitFor((m) => m.type === 'error' && m.message.includes('over'), 'post-reveal draft rejected')
-    ok(true, 'after the reveal the game is a museum — no more commands')
-
-    // host token unlocks the FULL log after the reveal (the take-home artifact)
-    const hostRevealLog = await fetchLog(alice.welcome!.hingeToken)
-    ok(hostRevealLog.logStr.includes(String(SECRET)), "after the reveal the HOST token gets the full log (bob's params included)")
-    const bobRevealLog = await fetchLog(bob2.welcome!.workerToken)
-    ok(!bobRevealLog.logStr.includes(String(ALICE_SECRET)), "a non-host seat STAYS redacted even after the reveal")
-    const pubRevealLog = await fetchLog()
-    ok(!pubRevealLog.logStr.includes(String(SECRET)) && !pubRevealLog.logStr.includes(String(ALICE_SECRET)), 'the tokenless log stays redacted after the reveal')
-
-    // ── Event feed dedup over the REAL wire ──────────────────────────────────
-    // Replay bob's captured snapshots through the client cursor: every event id
-    // must be delivered exactly once even though snapshots overlap within a tick.
-    {
-      const cursor = newFeedCursor()
-      const delivered: SimEvent[] = []
-      for (const raw of bob2.snapshotRaws) {
-        const v = (JSON.parse(raw) as { view: RoomView }).view
-        delivered.push(...freshEvents(cursor, v.events, v.eventSeq))
+    // determinism: replay MY OWN room? need full sources → use a fresh solo room
+    const solo = await api('/api/room', { body: { name: 'Solo', tickMs: 400 } })
+    const soloPin = solo.json['pin'] as string
+    const soloTok = solo.json['workerToken'] as string
+    await api(`/api/room/${soloPin}/deploy`, { token: soloTok, body: { id: 'm', scope: 'district', source: MINER_SRC } })
+    await new Promise((r) => setTimeout(r, 1700))
+    let logView: RoomLogView | null = null
+    let stView: RoomView | null = null
+    for (let i = 0; i < 6; i++) {
+      const lg = (await api(`/api/room/${soloPin}/log`, { token: soloTok })).json as unknown as RoomLogView
+      const st = (await api(`/api/room/${soloPin}/state`, { token: soloTok })).json['view'] as RoomView
+      if (lg.tick === st.tick) {
+        logView = lg
+        stView = st
+        break
       }
-      const drafts3 = delivered.filter((e) => e.t === 'drafted' && e.id === 'bob-s3').length
-      const armed3 = delivered.filter((e) => e.t === 'armed' && e.id === 'bob-s3').length
-      const scrapped4 = delivered.filter((e) => e.t === 'scrapped' && e.id === 'bob-s4').length
-      ok(drafts3 === 1, `wire feed dedup: bob-s3 'drafted' delivered exactly once (got ${drafts3})`)
-      ok(armed3 === 1, `wire feed dedup: bob-s3 'armed' delivered exactly once (got ${armed3})`)
-      ok(scrapped4 === 1, `wire feed dedup: bob-s4 'scrapped' delivered exactly once (got ${scrapped4})`)
-      const rawAppendCount = bob2.snapshotRaws.filter((raw) => raw.includes('"t":"drafted"') && raw.includes('"bob-s3"')).length
-      ok(rawAppendCount > 1, `the D1 bug was real: the same event crossed the wire in ${rawAppendCount} snapshots (naive append would duplicate)`)
+      await new Promise((r) => setTimeout(r, 120))
+    }
+    ok(logView !== null && stView !== null, 'log + state captured at the same tick')
+    if (logView && stView) {
+      const entries = logView.log.map((e) => ({ atTick: e.atTick, cmd: e.cmd as unknown as Command }))
+      const replayed = replay(logView.seed, entries, logView.tick)
+      ok(replayed.tick === stView.tick, 'replayed tick matches the live room')
+      ok(replayed.dyads[0].ore === stView.dyads[0].ore && replayed.dyads[0].tokens === stView.dyads[0].tokens, `REPLAY: seed + log reproduces the live room over the wire (ore ${replayed.dyads[0].ore}, ⚡ ${replayed.dyads[0].tokens})`)
+      ok(stateHash(replayed).length === 8, 'replay hash computable from the wire artifact')
     }
 
-    // ── THE ASYNC APPRENTICE (D3): full round-trip against the fake LLM ──────
-    // Dave's solo room. 60s tick = no regen noise; every token count is exact.
-    const dave = new TestClient('key-dave', 'Dave')
-    await dave.open('')
-    await dave.waitFor((m) => m.type === 'welcome', 'dave welcome')
-    const davePin = dave.welcome!.room
-    dave.send({ type: 'start', token: dave.welcome!.hingeToken, tickMs: 60000, autoAdvance: false })
-    await dave.waitView((v) => v.started, 'dave started')
-    ok(dave.view!.apprentice === 'live', "state says apprentice: 'live' (a model is wired)")
+    // ── refusal shapes ───────────────────────────────────────────────────────
+    ok((await api(`/api/room/ZZZZ/state`)).status === 404, 'unknown room → 404')
+    ok((await api(`/api/room/${pin}/deploy`, { token: 'w_bogus', body: { id: 'x', scope: 'district', source: 'act("farm", rate=1)' } })).status === 401, 'unknown token → 401')
+    ok((await api(`/api/room/${pin}/deploy`, { token: host.worker, body: { id: 'x', scope: 'nope', source: 'act("farm", rate=1)' } })).status === 400, 'bad scope → 400')
+    ok((await api(`/api/room/${pin}/deploy`, { token: host.worker, body: { id: 'x', scope: 'district' } })).status === 400, 'missing source → 400')
+    ok((await api(`/api/room/${pin}/undeploy`, { token: host.worker, body: { id: 'nope' } })).status === 409, 'undeploy unknown → 409 with the spoken reason')
+    ok((await api(`/api/room/${pin}/vote`, { token: host.hinge, body: {} })).status === 400, 'vote without go → 400')
 
-    // happy path: ask (ws, worker token) → debit NOW → drafts land async, 0-cost.
-    // Snapshots arrive one PER COMMAND (accept, accept, settle) — wait for the
-    // SETTLED state (hand full AND escrow empty), not just the hand, or the
-    // asserts race the settle snapshot.
-    dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'smart' })
-    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 2 && v.you!.pending.length === 0, 'smart drafts arrived + escrow settled')
-    ok(dave.view!.players[0].tokens === TOKEN_START - DRAFT_COST_SMART, `the request debited exactly ${DRAFT_COST_SMART} — the arriving drafts were free (already paid)`)
-    ok(true, 'the escrow settled once the batch landed')
-    const daveVerbs = dave.view!.you!.hand.map((sl) => sl.script.verb).sort()
-    ok(daveVerbs.join(',') === 'harvest,sell', `the REAL model's verbs came through (${daveVerbs.join('+')}) — flaw injection never touches the verb`)
-    ok(dave.view!.you!.hand.every((sl) => sl.script.id.startsWith('q1')), 'server-assigned draft ids (q1a, q1b)')
-
-    // timeout path: HANG → pending slot visible, then refund via draftFailed.
-    // The escrow was PROVEN empty above, so pending==1 here is unambiguously
-    // the hang (and the refund is the only road back to the pre-hang balance).
-    dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'cheap', order: 'HANG' })
-    await dave.waitView(
-      (v) => (v.you?.pending.length ?? 0) === 1 && v.players[0].tokens === TOKEN_START - DRAFT_COST_SMART - DRAFT_COST_CHEAP,
-      'pending request + debit visible while the model hangs',
-    )
-    ok(true, 'the debit landed the moment we asked (drafting… still in flight)')
-    await dave.waitView((v) => (v.you?.pending.length ?? 0) === 0 && v.players[0].tokens === TOKEN_START - DRAFT_COST_SMART, 'timeout refunded')
-    ok(true, `a hung model times out and REFUNDS the ${DRAFT_COST_CHEAP} (draftFailed in the log)`)
-    ok((dave.view!.you?.hand.length ?? 0) === 2, 'and no draft landed from the hang')
-    ok(dave.snapshotRaws.some((r) => r.includes('"t":"draftFailed"')), 'the refund event crossed the wire (feed line for the board)')
-
-    // fenced-JSON tolerance: prose + ```json fence still parses
-    dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'cheap', order: 'FENCED' })
-    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 3 && v.you!.pending.length === 0, 'fenced draft arrived')
-    ok(dave.view!.you!.hand.some((sl) => sl.script.verb === 'refine' && sl.script.id === 'q3a'), 'fenced JSON tolerated — the refine draft landed')
-
-    // gibberish → the ORGANIC hallucination fallback (a flawed preset, no refund)
-    dave.send({ type: 'draftRequest', token: dave.welcome!.workerToken, tier: 'cheap', order: 'GARBAGE' })
-    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 4 && v.you!.pending.length === 0, 'gibberish fallback arrived')
-    const organic = dave.view!.you!.hand.find((sl) => sl.script.id === 'q4a')
-    ok(organic !== undefined, 'unparseable model output still serves a draft (the organic path)')
-    ok(organic !== undefined && !staticCheck(organic.script).ok, 'and the organic fallback is oracle-RED — an honest hallucination')
-
-    // HTTP mirror: draft-request works with EITHER token (here: the hinge)
-    const httpReq = await fetch(`${BASE}/api/room/${davePin}/draft-request`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.hingeToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ tier: 'cheap' }),
-    })
-    const httpReqBody = await httpReq.json()
-    ok(httpReq.status === 200 && httpReqBody.ok && httpReqBody.reqId === 'q5', `HTTP draft-request lands with the hinge token too (either surface may ask; reqId ${httpReqBody.reqId})`)
-    await dave.waitView((v) => (v.you?.hand.length ?? 0) === 6 && v.you!.pending.length === 0, 'HTTP-requested drafts arrived')
-    const reqNoToken = await fetch(`${BASE}/api/room/${davePin}/draft-request`, { method: 'POST', body: '{"tier":"cheap"}' })
-    ok(reqNoToken.status === 401, 'HTTP draft-request with no token → 401')
-
-    // HTTP oracle in ROUND 1 → 409 with the sim's spoken reason
-    const oracleR1 = await fetch(`${BASE}/api/room/${davePin}/oracle`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'q1a' }),
-    })
-    const oracleR1Body = await oracleR1.json()
-    ok(oracleR1.status === 409 && oracleR1Body.ok === false && oracleR1Body.error.includes("hasn't been invented"), `sim refusals are 409 with the spoken reason ("${oracleR1Body.error}")`)
-
-    // advance dave's solo room to round 2 — the full-rules phase
-    dave.send({ type: 'phase', token: dave.welcome!.hingeToken, to: 'intermission' })
-    await dave.waitView((v) => v.phase === 'intermission', 'dave intermission')
-    dave.send({ type: 'phase', token: dave.welcome!.hingeToken, to: 'round2' })
-    await dave.waitView((v) => v.phase === 'round2', 'dave round2')
-    ok(dave.view!.players[0].tokens === TOKEN_START, 'round-2 reset: a clean token slate for the HTTP mirror tests')
-
-    // HTTP direct draft of a KNOWN-green script, then the full mirror:
-    // oracle (either token, full report) → arm (hinge) → disarm (either) → scrap
-    const dvDraft = await fetch(`${BASE}/api/room/${davePin}/draft`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ script: { id: 'dv1', verb: 'harvest', params: { rate: 2, node: 1 } }, tier: 'cheap' }),
-    })
-    ok(dvDraft.status === 200, 'HTTP direct draft still works (the BYO path)')
-    const oracleOk = await fetch(`${BASE}/api/room/${davePin}/oracle`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'dv1' }),
-    })
-    const oracleOkBody = await oracleOk.json()
-    ok(oracleOk.status === 200 && oracleOkBody.ok && oracleOkBody.report.ok && oracleOkBody.report.prediction.length === 3, 'HTTP oracle (worker token) returns the verdict + 3-tick dry-run')
-    await dave.waitView((v) => v.players[0].tokens === TOKEN_START - DRAFT_COST_CHEAP - ORACLE_COST, 'oracle billed over HTTP')
-    const armHttp = await fetch(`${BASE}/api/room/${davePin}/arm`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.hingeToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'dv1' }),
-    })
-    ok(armHttp.status === 200, 'HTTP arm (hinge) lands')
-    const disarmWorker = await fetch(`${BASE}/api/room/${davePin}/disarm`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'dv1' }),
-    })
-    ok(disarmWorker.status === 403, 'HTTP disarm with the WORKER token → 403 (D4 tightening: script-lifecycle control is a hinge act)')
-    const disarmHttp = await fetch(`${BASE}/api/room/${davePin}/disarm`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.hingeToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'dv1' }),
-    })
-    ok(disarmHttp.status === 200, 'HTTP disarm with the HINGE token lands')
-    const disarmAgain = await fetch(`${BASE}/api/room/${davePin}/disarm`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.hingeToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'dv1' }),
-    })
-    const disarmAgainBody = await disarmAgain.json()
-    ok(disarmAgain.status === 409 && disarmAgainBody.ok === false && typeof disarmAgainBody.error === 'string', 'double-disarm → 409 with the consistent { ok:false, error } shape')
-    const scrapHttp = await fetch(`${BASE}/api/room/${davePin}/scrap`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'dv1' }),
-    })
-    ok(scrapHttp.status === 200, 'HTTP scrap (worker token) frees the slot')
-    await dave.waitView((v) => !v.you!.hand.some((sl) => sl.script.id === 'dv1'), 'dv1 gone after HTTP scrap')
-    const scrapGhost = await fetch(`${BASE}/api/room/${davePin}/scrap`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'ghost' }),
-    })
-    ok(scrapGhost.status === 409, 'scrapping a nonexistent script → 409 (the sim said no)')
-    const oracleNoId = await fetch(`${BASE}/api/room/${davePin}/oracle`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: '{}',
-    })
-    ok(oracleNoId.status === 400, 'malformed request (missing id) → 400, distinct from sim refusals')
-
-    // the organic q4a draft is oracle-RED over the wire too
-    const oracleOrganic = await fetch(`${BASE}/api/room/${davePin}/oracle`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'q4a' }),
-    })
-    const oracleOrganicBody = await oracleOrganic.json()
-    ok(oracleOrganic.status === 200 && oracleOrganicBody.report.ok === false, 'the oracle catches the organic hallucination over HTTP (paid check, red verdict)')
-    dave.close()
-
-    // a finished room refuses new requests with the same spoken-reason shape
-    const revealReq = await fetch(`${BASE}/api/room/${pin}/draft-request`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${bob.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ tier: 'cheap' }),
-    })
-    const revealReqBody = await revealReq.json()
-    ok(revealReq.status === 409 && revealReqBody.error.includes('over'), 'draft-request after the reveal → 409 (the game is a museum)')
-
-    // ── D4: HTTP ROOM LIFECYCLE — create → join → play, no websocket anywhere ─
-    const post = (path: string, tok: string | null, bodyObj?: unknown) =>
-      fetch(`${BASE}${path}`, {
-        method: 'POST',
-        headers: tok ? { 'content-type': 'application/json', authorization: `Bearer ${tok}` } : { 'content-type': 'application/json' },
-        body: JSON.stringify(bodyObj ?? {}),
-      })
-
-    const createRes = await post('/api/room', null, { name: 'Hera', tickMs: 60000, round1Ticks: 3, round2Ticks: 3, autoAdvance: false })
-    const hera = await createRes.json()
-    ok(createRes.status === 200 && hera.ok && new RegExp(`^[${CODE_ALPHABET}]{4}$`).test(hera.pin), `HTTP create opens a room (${hera.pin})`)
-    ok(hera.seat === 0 && hera.workerToken.startsWith('w_') && hera.hingeToken.startsWith('h_'), 'HTTP creator seated as HOST (seat 0) with both tokens')
-    ok(typeof hera.key === 'string' && hera.key.length > 0, 'create mints a reconnect key')
-    ok((await fetch(`${BASE}/api/room`)).status === 405, 'GET /api/room → 405')
-    const other = await (await post('/api/room', null)).json()
-    ok(other.ok && other.pin !== hera.pin, `a second create gets a DISTINCT pin (${other.pin} ≠ ${hera.pin} — collisions handled by mint-until-unique)`)
-
-    const ivanRes = await post(`/api/room/${hera.pin}/join`, null, { name: 'Ivan' })
-    const ivan = await ivanRes.json()
-    ok(ivanRes.status === 200 && ivan.ok && ivan.seat === 1, 'HTTP join by PIN seats the agent (seat 1)')
-    ok(ivan.workerToken !== hera.workerToken && ivan.workerToken.startsWith('w_') && ivan.hingeToken.startsWith('h_'), 'the joiner gets its OWN token pair')
-    const ivan2 = await (await post(`/api/room/${hera.pin}/join`, null, { name: 'Ivan', key: ivan.key })).json()
-    ok(ivan2.ok && ivan2.seat === 1 && ivan2.rejoined === true && ivan2.workerToken === ivan.workerToken && ivan2.hingeToken === ivan.hingeToken, 'HTTP reconnect-by-key: same seat, SAME tokens back')
-    ok((await post('/api/room/OOOO/join', null, { name: 'Ghost' })).status === 404, 'HTTP join on a nonexistent PIN → 404 (O is not even in the alphabet)')
-
-    // the paste-prompt (the phone's "Connect your agent" panel reads this)
-    const apRes = await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt?token=${ivan.workerToken}`)
-    const ap = await apRes.text()
-    ok(apRes.status === 200 && ap.includes(hera.pin) && ap.includes(ivan.workerToken), 'agent-prompt returns the paste-prompt: PIN + WORKER token inside')
-    ok(!ap.includes(ivan.hingeToken) && !ap.includes(hera.hingeToken), 'the paste-prompt NEVER carries a hinge token')
-    ok(!ap.includes(`/api/room/${hera.pin}/arm`), 'the paste-prompt teaches NO arm endpoint')
-    ok(ap.toLowerCase().includes('approve the curl') && ap.toLowerCase().includes('arms on their phone'), 'the paste-prompt keeps the covenant: approve-the-curl + your-human-arms-on-their-phone')
-    ok(ap.toLowerCase().includes('never bypass'), 'the paste-prompt forbids bypassing the agent\'s own permission prompts')
-    ok(ap.includes('KEEP PLAYING') && ap.toLowerCase().includes('never faster than 3s'), 'the paste-prompt teaches the MONITORING loop (poll politely, react to change)')
-    ok(ap.includes('lastRun') && ap.includes('"reveal": STOP'), 'monitoring covers per-script yield + the stop-at-reveal rule')
-    ok(ap.includes('/api/rules'), 'the paste-prompt points the agent at the full rules (curl /api/rules)')
-    ok((await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt?token=${ivan.hingeToken}`)).status === 403, 'agent-prompt with a HINGE token → 403 (wrong surface to ask)')
-    ok((await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt`)).status === 401, 'agent-prompt with no token → 401')
-
-    // start: a HOST act on the HUMAN surface, over HTTP
-    ok((await post(`/api/room/${hera.pin}/start`, ivan.hingeToken)).status === 403, 'HTTP start by a non-host seat → 403')
-    ok((await post(`/api/room/${hera.pin}/start`, hera.workerToken)).status === 403, 'HTTP start with the host WORKER token → 403 (starting is a human act)')
-    ok((await post(`/api/room/${hera.pin}/start`, hera.hingeToken)).status === 200, 'HTTP start with the host hinge lands')
-    const st0 = await (await fetch(`${BASE}/api/room/${hera.pin}/state`, { headers: { authorization: `Bearer ${ivan.workerToken}` } })).json()
-    ok(st0.ok && st0.view.started && st0.view.tickMs === 60000 && st0.view.ticksRemaining === 3, 'create-time presets held through start: 60s tick + round-1 budget 3 (dev-fast from curl alone)')
-    ok((await post(`/api/room/${hera.pin}/start`, hera.hingeToken)).status === 409, 'double-start → 409')
-
-    // the full BYO loop, HTTP only. h1 proves the token split; h2 (never
-    // armed, so it CARRIES into round 2) proves draft → oracle → verified arm.
-    ok((await post(`/api/room/${hera.pin}/draft`, ivan.workerToken, { script: { id: 'h1', verb: 'harvest', params: { rate: 3, node: 1 } }, tier: 'cheap' })).status === 200, 'loop: the agent drafts its OWN script over HTTP (BYO — no server LLM anywhere)')
-    ok((await post(`/api/room/${hera.pin}/arm`, ivan.workerToken, { id: 'h1' })).status === 403, 'loop: the agent CANNOT arm (worker token → 403; the hinge holds)')
-    ok((await post(`/api/room/${hera.pin}/arm`, ivan.hingeToken, { id: 'h1' })).status === 200, "loop: the human's hinge arms it (YOLO in round 1)")
-    ok((await post(`/api/room/${hera.pin}/disarm`, ivan.workerToken, { id: 'h1' })).status === 403, 'loop: worker disarm → 403 (D4 tightening — lifecycle is the hinge)')
-    ok((await post(`/api/room/${hera.pin}/disarm`, ivan.hingeToken, { id: 'h1' })).status === 200, 'loop: hinge disarm lands')
-    ok((await post(`/api/room/${hera.pin}/draft`, ivan.workerToken, { script: { id: 'h2', verb: 'harvest', params: { rate: 2, node: 1 } }, tier: 'cheap' })).status === 200, 'loop: a second draft stays un-played (it will carry into round 2)')
-    ok((await post(`/api/room/${hera.pin}/phase`, ivan.hingeToken, { to: 'intermission' })).status === 403, 'HTTP phase by a non-host → 403')
-    ok((await post(`/api/room/${hera.pin}/phase`, hera.hingeToken, { to: 'intermission' })).status === 200, 'host advances to intermission over HTTP')
-    ok((await post(`/api/room/${hera.pin}/phase`, hera.hingeToken, { to: 'round2' })).status === 200, 'host advances to round 2 over HTTP')
-    const oracleLoop = await post(`/api/room/${hera.pin}/oracle`, ivan.workerToken, { id: 'h2' })
-    const oracleLoopBody = await oracleLoop.json()
-    ok(oracleLoop.status === 200 && oracleLoopBody.report.ok && oracleLoopBody.report.prediction.length === 3, 'loop: round-2 oracle verdict + 3-tick dry-run over HTTP')
-    ok((await post(`/api/room/${hera.pin}/arm`, ivan.hingeToken, { id: 'h2' })).status === 200, 'loop: the verified arm lands')
-    const stEnd = await (await fetch(`${BASE}/api/room/${hera.pin}/state`, { headers: { authorization: `Bearer ${ivan.workerToken}` } })).json()
-    const h2end = stEnd.view.you.hand.find((sl: { script: { id: string } }) => sl.script.id === 'h2')
-    ok(h2end && h2end.armed === true && h2end.yolo === false && h2end.everGreen === true, 'FULL HTTP LIFECYCLE PROVEN: create → join → draft → oracle → arm → state, no websocket anywhere')
-
-    // ── HOTFIX: auto-advance (default ON) + hold + OFF-manual + liveness ─────
-    // The server runs AUTO_ADVANCE_MS=1200 / AUTO_DWELL_MS=600 (env) so the
-    // REAL path — budget spent → countdown → server-issued logged phase
-    // command — completes inside the suite.
-
-    // (1) default ON: nobody sends a single phase command in this room
-    const auto = new TestClient('key-auto', 'Auto')
-    await auto.open('')
-    await auto.waitFor((m) => m.type === 'welcome', 'auto welcome')
-    const autoPin = auto.welcome!.room
-    auto.send({ type: 'start', token: auto.welcome!.hingeToken, tickMs: 300, round1Ticks: 2, round2Ticks: 2 })
-    await auto.waitView((v) => v.started, 'auto room started')
-    ok(auto.view!.autoAdvance === true, 'autoAdvance DEFAULTS ON (no flag passed at start)')
-    await auto.waitView((v) => v.phase === 'intermission', 'auto → intermission')
-    ok(true, 'round-1 budget exhaustion AUTO-advances to intermission (the silent freeze is gone)')
-    ok(
-      auto.snapshotRaws.some((r) => {
-        const v = (JSON.parse(r) as { view: RoomView }).view
-        return v.phase === 'round1' && v.autoAdvanceIn !== null
-      }),
-      'the visible countdown (autoAdvanceIn) crossed the wire before the advance',
-    )
-    await auto.waitView((v) => v.phase === 'round2', 'auto → round2')
-    ok(true, 'the intermission auto-advances after the dwell (summary stays readable)')
-    await auto.waitView((v) => v.phase === 'reveal', 'auto → reveal')
-    ok(true, 'round-2 budget exhaustion auto-advances to the reveal')
-    await new Promise((r) => setTimeout(r, 1800))
-    ok(auto.view!.phase === 'reveal', 'the reveal NEVER auto-advances (waited 1.8s > countdown)')
-
-    // the auto advances are ordinary LOGGED host phase commands → replayable
-    const autoLog = await (await fetch(`${BASE}/api/room/${autoPin}/log`, { headers: { authorization: `Bearer ${auto.welcome!.hingeToken}` } })).json()
-    const phaseCmds = (autoLog.log as Array<{ atTick: number; cmd: { t: string; to?: string } }>).filter((e) => e.cmd.t === 'phase')
-    ok(phaseCmds.length === 3 && phaseCmds.map((e) => e.cmd.to).join(',') === 'intermission,round2,reveal', 'all three auto-advances are LOGGED phase commands (replay carries them)')
-    // REPLAY DETERMINISM on the real path: seed + served log, replayed locally,
-    // matches the served end state (segment ticks by the phase entries)
-    const rsim = newGame(seedFromCode(autoPin), 1, ['Auto'], autoLog.phaseTicks)
-    for (const { atTick, cmd } of autoLog.log as Array<{ atTick: number; cmd: Command }>) {
-      let guard = 0
-      while (rsim.tick < atTick && guard++ < 1000) tick(rsim)
-      apply(rsim, cmd)
-    }
-    let runOut = 0
-    while (ticksRunning(rsim) && runOut++ < 1000) tick(rsim)
-    const servedEnd = (await (await fetch(`${BASE}/api/room/${autoPin}/state`, { headers: { authorization: `Bearer ${auto.welcome!.workerToken}` } })).json()).view
-    ok(
-      rsim.phase === 'reveal' && rsim.tick === servedEnd.tick && rsim.players[0].tokens === servedEnd.players[0].tokens && score(rsim.players[0]) === servedEnd.players[0].score,
-      `replay determinism intact: local replay of seed+log matches the served state (tick ${rsim.tick}, tokens ${rsim.players[0].tokens})`,
-    )
-    auto.close()
-
-    // (2) HOLD: the host can suspend a pending countdown; manual advance resumes auto
-    const holdC = new TestClient('key-hold', 'Holdy')
-    await holdC.open('')
-    await holdC.waitFor((m) => m.type === 'welcome', 'hold welcome')
-    const holdPin = holdC.welcome!.room
-    holdC.send({ type: 'start', token: holdC.welcome!.hingeToken, tickMs: 300, round1Ticks: 1, round2Ticks: 1 })
-    await holdC.waitView((v) => v.phase === 'round1' && v.autoAdvanceIn !== null, 'hold-room countdown visible')
-    const holdWorker = await fetch(`${BASE}/api/room/${holdPin}/hold`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${holdC.welcome!.workerToken}`, 'content-type': 'application/json' },
-      body: '{}',
-    })
-    ok(holdWorker.status === 403, 'HTTP hold with the WORKER token → 403 (holding is a host-hinge act)')
-    holdC.send({ type: 'hold', token: holdC.welcome!.hingeToken })
-    await holdC.waitView((v) => v.autoHeld === true && v.autoAdvanceIn === null, 'held')
-    await new Promise((r) => setTimeout(r, 2000))
-    ok(holdC.view!.phase === 'round1' && holdC.view!.autoHeld === true, 'HOLD sticks: no advance while held (2s > the 1.2s countdown)')
-    holdC.send({ type: 'phase', token: holdC.welcome!.hingeToken, to: 'intermission' })
-    await holdC.waitView((v) => v.phase === 'intermission', 'held phase advances only when the host calls it')
-    await holdC.waitView((v) => v.phase === 'round2', 'auto-advance resumes after the manual call (hold is per-phase)')
-    ok(true, 'hold → manual call → auto resumes next phase')
-    holdC.close()
-
-    // (3) OFF preserves manual behavior — budget exhaustion just freezes, loudly
-    const man = new TestClient('key-manual', 'Manny')
-    await man.open('')
-    await man.waitFor((m) => m.type === 'welcome', 'manual welcome')
-    man.send({ type: 'start', token: man.welcome!.hingeToken, tickMs: 300, round1Ticks: 1, autoAdvance: false })
-    await man.waitView((v) => v.started && v.autoAdvance === false, 'manual room started with autoAdvance OFF')
-    await man.waitView((v) => v.phase === 'round1' && v.ticksRemaining === 0, 'manual budget spent')
-    await new Promise((r) => setTimeout(r, 2500))
-    ok(man.view!.phase === 'round1' && man.view!.autoAdvanceIn === null, 'OFF: no countdown, no advance — the host owns the weave (the talk mode)')
-    man.send({ type: 'phase', token: man.welcome!.hingeToken, to: 'intermission' })
-    await man.waitView((v) => v.phase === 'intermission', 'manual host advance still works')
-    await new Promise((r) => setTimeout(r, 2200))
-    ok(man.view!.phase === 'intermission', 'OFF: the intermission holds too (2.2s > dwell+countdown)')
-    man.close()
-
-    // (4) agent liveness: HTTP worker calls mark the dyad live; the phone's own
-    // agent-prompt fetch must NOT (it would false-positive every seat)
-    const dyad = await (await post('/api/room', null, { name: 'Dya', tickMs: 60000, autoAdvance: false })).json()
-    ok((await post(`/api/room/${dyad.pin}/start`, dyad.hingeToken)).status === 200, 'dyad room started')
-    const stA = (await (await fetch(`${BASE}/api/room/${dyad.pin}/state`)).json()).view
-    ok(stA.players[0].agentSeenAgoMs === null, 'no worker call yet → agentSeenAgoMs null (no agent connected)')
-    await fetch(`${BASE}/api/room/${dyad.pin}/agent-prompt?token=${dyad.workerToken}`)
-    const stB = (await (await fetch(`${BASE}/api/room/${dyad.pin}/state`)).json()).view
-    ok(stB.players[0].agentSeenAgoMs === null, "the phone's agent-prompt fetch does NOT count as a live agent")
-    await fetch(`${BASE}/api/room/${dyad.pin}/state`, { headers: { authorization: `Bearer ${dyad.workerToken}` } })
-    const stC = (await (await fetch(`${BASE}/api/room/${dyad.pin}/state`)).json()).view
-    ok(typeof stC.players[0].agentSeenAgoMs === 'number' && stC.players[0].agentSeenAgoMs < 5000, `a worker-token API call marks the agent LIVE (${stC.players[0].agentSeenAgoMs}ms ago)`)
-    ok(!JSON.stringify(stC).includes(dyad.workerToken) && !JSON.stringify(stC).includes(dyad.hingeToken), 'liveness is a timestamp only — no token material in the public view')
-
-    // (5) per-script lastRun: the agent sees its own yield; the public stays fate-only
-    const yld = await (await post('/api/room', null, { name: 'Yield', tickMs: 300, round1Ticks: 5, autoAdvance: false })).json()
-    ok((await post(`/api/room/${yld.pin}/start`, yld.hingeToken)).status === 200, 'yield room started')
-    ok((await post(`/api/room/${yld.pin}/draft`, yld.workerToken, { script: { id: 'y1', verb: 'harvest', params: { rate: 2, node: 1 } }, tier: 'cheap' })).status === 200, 'yield draft landed')
-    ok((await post(`/api/room/${yld.pin}/arm`, yld.hingeToken, { id: 'y1' })).status === 200, 'yield armed')
-    await new Promise((r) => setTimeout(r, 800))
-    const ySt = (await (await fetch(`${BASE}/api/room/${yld.pin}/state`, { headers: { authorization: `Bearer ${yld.workerToken}` } })).json()).view
-    const y1 = ySt.you.hand.find((sl: { script: { id: string } }) => sl.script.id === 'y1')
-    ok(y1?.lastRun && y1.lastRun.ran === true && y1.lastRun.note === '+2 matter from vein #1', `own-seat /state carries lastRun — agents can see per-script yield (${y1?.lastRun?.note})`)
-    const yPub = (await (await fetch(`${BASE}/api/room/${yld.pin}/state`)).json()).view
-    ok(
-      yPub.players[0].scripts.length > 0 && yPub.players[0].scripts.every((sc: Record<string, unknown>) => !('lastRun' in sc) && !('script' in sc)),
-      'public script views stay fate-only — no lastRun, no bodies',
-    )
-
-    // ── THE DEPTH UPDATE: map/veins on the wire, prospect, contracts, and ────
-    // ── THE ASYMMETRY (rush rides ws-only — the agent's HTTP view is narrow) ──
-    {
-      const dp = await (await post('/api/room', null, { name: 'Depth', tickMs: 300, round1Ticks: 1, round2Ticks: 12, autoAdvance: false })).json()
-      ok((await post(`/api/room/${dp.pin}/start`, dp.hingeToken)).status === 200, 'depth room started')
-      const dSt = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`, { headers: { authorization: `Bearer ${dp.workerToken}` } })).json()).view
-      // (1) the map is on the wire: veins with reserves, both market prices
-      ok(Array.isArray(dSt.veins) && dSt.veins.length >= 3, `a fresh room's state carries the vein map (${dSt.veins.length} veins)`)
-      ok(dSt.veins.every((v: Record<string, unknown>) => typeof v.id === 'number' && typeof v.rate === 'number' && typeof v.reserve === 'number' && typeof v.x === 'number'), 'each vein carries id/rate/reserve/layout')
-      ok(typeof dSt.market === 'number' && typeof dSt.marketCharms === 'number', 'both goods quote a current price')
-      ok(Array.isArray(dSt.contracts), 'the contracts array is on the wire')
-      // (2) ★ THE ASYMMETRY, structurally: NO rush key on HTTP — any token
-      ok(!('rush' in dSt) && !('nextRushInTicks' in dSt), 'the agent HTTP view NEVER carries the rush banner or forecast (worker token)')
-      const dPub = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`)).json()).view
-      ok(!('rush' in dPub) && !('nextRushInTicks' in dPub), 'the tokenless HTTP view is narrow too')
-      const dHinge = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`, { headers: { authorization: `Bearer ${dp.hingeToken}` } })).json()).view
-      ok(!('rush' in dHinge), 'even the hinge token gets the narrow view over HTTP — rush is a ws (human-surface) fact')
-      // …while the ws BOARD snapshot carries the rush field + forecast
-      const dBoard = new TestClient('key-dboard', 'DBoard')
-      await dBoard.open(dp.pin, true)
-      const dbView = await dBoard.waitView((v) => v.started, 'depth board snapshot')
-      ok('rush' in dbView && 'nextRushInTicks' in dbView, 'the ws board snapshot carries rush + forecast (the human surface holds the map)')
-      ok(typeof dbView.nextRushInTicks === 'number', `the board can even forecast the next window (~${dbView.nextRushInTicks}t)`)
-      dBoard.close()
-      // (3) prospect over HTTP (worker): paid, own-seat, invisible to others
-      const proRes = await post(`/api/room/${dp.pin}/prospect`, dp.workerToken)
-      ok(proRes.status === 200, 'HTTP prospect (worker token) lands')
-      const dSt2 = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`, { headers: { authorization: `Bearer ${dp.workerToken}` } })).json()).view
-      ok(dSt2.you.prospects.length === 1 && typeof dSt2.you.prospects[0].rate === 'number' && dSt2.you.prospects[0].spawnsInTicks >= 0, `you.prospects carries the preview (vein #${dSt2.you.prospects[0].id})`)
-      const joe = await (await post(`/api/room/${dp.pin}/join`, null, { name: 'Joe' })).json()
-      // (a started room refuses NEW seats — Joe rejoin path not needed; use the public view instead)
-      ok(!JSON.stringify(dPub).includes('"prospects"'), 'prospects never appear in the public view (own-seat info)')
-      void joe
-      // (4) contracts: none in round 1; offers post in round 2; the HINGE claims
-      ok(dSt2.contracts.length === 0 && dSt2.phase === 'round1', 'round 1 posts no contract offers')
-      ok((await post(`/api/room/${dp.pin}/phase`, dp.hingeToken, { to: 'intermission' })).status === 200, 'depth room → intermission')
-      ok((await post(`/api/room/${dp.pin}/phase`, dp.hingeToken, { to: 'round2' })).status === 200, 'depth room → round 2')
-      await new Promise((r) => setTimeout(r, 1200)) // round-2 tick 2+ (300ms tick) — the first offer posts
-      const dSt3 = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`)).json()).view
-      ok(dSt3.contracts.length >= 1 && dSt3.contracts[0].status === 'open', `a round-2 offer posted (contract #${dSt3.contracts[0]?.id}: ${dSt3.contracts[0]?.qty} ${dSt3.contracts[0]?.good})`)
-      const claimWorker = await post(`/api/room/${dp.pin}/claim-contract`, dp.workerToken, { id: dSt3.contracts[0].id })
-      ok(claimWorker.status === 403, 'claim-contract with the WORKER token → 403 (strategy is the human\'s)')
-      const claimHinge = await post(`/api/room/${dp.pin}/claim-contract`, dp.hingeToken, { id: dSt3.contracts[0].id })
-      ok(claimHinge.status === 200, 'claim-contract with the HINGE token lands')
-      const dSt4 = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`)).json()).view
-      ok(dSt4.contracts[0].status === 'claimed' && dSt4.contracts[0].player === 0 && typeof dSt4.contracts[0].deadline === 'number', 'the claim binds publicly with a deadline (the room watches the race)')
-      ok((await post(`/api/room/${dp.pin}/claim-contract`, dp.hingeToken, { id: 999 })).status === 409, 'claiming a nonexistent contract → 409 with the spoken reason')
-      // (5) the new verbs ride the same wire: craft + sell-charms drafts land
-      ok((await post(`/api/room/${dp.pin}/draft`, dp.workerToken, { script: { id: 'cf1', verb: 'craft', params: { rate: 1 } }, tier: 'cheap' })).status === 200, 'a craft draft lands over HTTP')
-      ok((await post(`/api/room/${dp.pin}/draft`, dp.workerToken, { script: { id: 'sc1', verb: 'sell', params: { amount: 2, good: 'charms' } }, tier: 'cheap' })).status === 200, 'a sell-charms draft lands over HTTP (string enum param through the wire)')
-      const orCf = await (await post(`/api/room/${dp.pin}/oracle`, dp.workerToken, { id: 'cf1' })).json()
-      ok(orCf.ok && orCf.report.ok, 'the oracle greenlights a craft over HTTP')
-      const orSc = await (await post(`/api/room/${dp.pin}/oracle`, dp.workerToken, { id: 'sc1' })).json()
-      ok(orSc.ok && orSc.report.ok && orSc.report.reasons.some((r: string) => r.includes('BASE prices')), 'the sell dry-run SAYS the forecast lives on the board (the asymmetry is taught in-band)')
-      // (6) the paste-prompt teaches the blind spot + the new verbs
-      const dAp = await (await fetch(`${BASE}/api/room/${dp.pin}/agent-prompt?token=${dp.workerToken}`)).text()
-      ok(dAp.includes('KNOW YOUR BLIND SPOT') && dAp.toLowerCase().includes('holds the map'), 'the paste-prompt teaches the asymmetry (listen to your human)')
-      ok(dAp.includes('"craft"') && dAp.includes('prospect') && dAp.includes('node'), 'the paste-prompt cheatsheet covers craft/prospect/node')
-      // (7) armed verb+node are public (RTS units on the map); bodies stay private
-      ok((await post(`/api/room/${dp.pin}/draft`, dp.workerToken, { script: { id: 'hv1', verb: 'harvest', params: { rate: 2, node: 1 } }, tier: 'cheap' })).status === 200, 'map-worker draft lands')
-      ok((await post(`/api/room/${dp.pin}/arm`, dp.hingeToken, { id: 'hv1' })).status === 200, 'map-worker armed')
-      const dSt5 = (await (await fetch(`${BASE}/api/room/${dp.pin}/state`)).json()).view
-      const hv = dSt5.players[0].scripts.find((sc: Record<string, unknown>) => sc.id === 'hv1')
-      const cf = dSt5.players[0].scripts.find((sc: Record<string, unknown>) => sc.id === 'cf1')
-      ok(hv && hv.verb === 'harvest' && hv.node === 1, 'an ARMED harvester is a public map unit (verb + vein binding)')
-      ok(cf && cf.verb === null && !('params' in cf), 'an un-armed draft stays body-secret (verb null, no params ever)')
-    }
-
-    // ── PRACTICE MODE: a second server with NO model wired ───────────────────
-    // The env value is an UNINTERPOLATED compose literal — the exact string the
-    // first D3 deploy shipped (Dokploy left `${APPRENTICE_BASE_URL:-}` verbatim,
-    // caught live). A non-http "URL" must mean practice, never fake-live.
-    practiceServer = spawnGame(PRACTICE_PORT, { APPRENTICE_BASE_URL: '${APPRENTICE_BASE_URL:-}' })
-    await awaitBoot(practiceServer)
-    // TestClient is pinned to PORT — drive the practice server raw
-    const praWs = new WebSocket(`ws://localhost:${PRACTICE_PORT}/ws`)
-    const praMsgs: ServerMessage[] = []
-    const praWaiters: Array<() => void> = []
-    praWs.on('message', (raw) => {
-      praMsgs.push(JSON.parse(String(raw)) as ServerMessage)
-      for (const w of praWaiters.splice(0)) w()
-    })
-    const praWait = async (pred: (m: ServerMessage) => boolean, what: string): Promise<ServerMessage> => {
-      const start = Date.now()
-      for (;;) {
-        const hit = praMsgs.find(pred)
-        if (hit) return hit
-        if (Date.now() - start > 8000) throw new Error(`timeout: ${what}`)
-        await new Promise<void>((res) => {
-          const t = setTimeout(res, 100)
-          praWaiters.push(() => {
-            clearTimeout(t)
-            res()
-          })
-        })
-      }
-    }
-    await new Promise<void>((res, rej) => {
-      praWs.once('open', () => res())
-      praWs.once('error', rej)
-    })
-    praWs.send(JSON.stringify({ type: 'join', room: '', name: 'Erin', key: 'key-erin' } satisfies ClientMessage))
-    const praWelcome = (await praWait((m) => m.type === 'welcome', 'practice welcome')) as Extract<ServerMessage, { type: 'welcome' }>
-    praWs.send(JSON.stringify({ type: 'start', token: praWelcome.hingeToken, tickMs: 60000, autoAdvance: false } satisfies ClientMessage))
-    await praWait((m) => m.type === 'snapshot' && m.view.started, 'practice started')
-    praWs.send(JSON.stringify({ type: 'draftRequest', token: praWelcome.workerToken, tier: 'cheap' } satisfies ClientMessage))
-    const praDone = (await praWait(
-      (m) => m.type === 'snapshot' && (m.view.you?.hand.length ?? 0) >= 2 && (m.view.you?.pending.length ?? 0) === 0,
-      'practice drafts landed',
-    )) as Extract<ServerMessage, { type: 'snapshot' }>
-    ok(praDone.view.apprentice === 'practice', "no APPRENTICE_BASE_URL → state says apprentice: 'practice' (dev/deploy degrade gracefully)")
-    const praHand = praDone.view.you!.hand
-    ok(praHand.length >= 2 && praHand.length <= 3, `practice mode serves 2-3 seeded drafts with no LLM anywhere (got ${praHand.length})`)
-    ok(praDone.view.players[0].tokens === TOKEN_START - DRAFT_COST_CHEAP, 'practice mode bills the same economy (debit at request, drafts free)')
-    praWs.close()
-
-    // ── REDACTION AUDIT over everything that crossed the wire ────────────────
-    const allTokens = [
-      alice.welcome!.workerToken,
-      alice.welcome!.hingeToken,
-      bob.welcome!.workerToken,
-      bob.welcome!.hingeToken,
-    ]
-    function audit(c: TestClient, ownsSecret: boolean, label: string): void {
-      let tokenLeak = false
-      let bodyLeak = false
-      let sawOwnSecret = false
-      for (const raw of c.snapshotRaws) {
-        for (const t of allTokens) if (raw.includes(t)) tokenLeak = true
-        if (raw.includes(String(SECRET))) {
-          if (ownsSecret) sawOwnSecret = true
-          else bodyLeak = true
-        }
-      }
-      ok(!tokenLeak, `${label}: NO auth token ever appears in a snapshot`)
-      if (ownsSecret) ok(sawOwnSecret, `${label}: sees his own script body (the test can fail)`)
-      else ok(!bodyLeak, `${label}: never sees Bob's script body (hands redacted)`)
-    }
-    audit(alice, false, 'alice')
-    audit(board, false, 'board')
-    audit(bob, true, 'bob')
-    // symmetric: alice's script body never reached the other seats either
-    ok(!bob2.snapshotRaws.some((r) => r.includes(String(ALICE_SECRET))), "bob2: never sees alice's script body")
-    ok(!board.snapshotRaws.some((r) => r.includes(String(ALICE_SECRET))), "board: never sees alice's script body")
-    ok(alice.snapshotRaws.some((r) => r.includes(String(ALICE_SECRET))), 'alice: sees her own script body (the symmetric test can fail)')
-    // structural check: public script views carry no 'script'/'params' keys
-    const lastBoard = JSON.parse(board.snapshotRaws[board.snapshotRaws.length - 1])
-    const boardScripts = (lastBoard.view as RoomView).players.flatMap((p) => p.scripts) as unknown as Record<string, unknown>[]
-    ok(boardScripts.length > 0 && boardScripts.every((sc) => !('script' in sc) && !('params' in sc)), 'public script views are fate-only (no body keys at all)')
-
-    alice.close()
-    bob2.close()
-    board.close()
+    // token sanity: the economy started where the rules said
+    ok(TOKEN_START === 20, 'TOKEN_START pinned (rules drift guard)')
   } finally {
-    fakeLLM.close()
     await killGame(server)
-    if (practiceServer) await killGame(practiceServer)
   }
 
-  console.log(`\n${passed} passed, ${failed} failed`)
-  process.exit(failed > 0 ? 1 : 0)
+  console.log(failed === 0 ? `WSTEST OK — ${passed} assertions` : `WSTEST FAILED — ${failed} failures (${passed} passed)`)
+  process.exit(failed === 0 ? 0 : 1)
 }
 
 main().catch((e) => {

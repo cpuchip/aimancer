@@ -1,39 +1,25 @@
-// Pure world mechanics shared by the sim's tick AND the oracle's dry-run:
-// the seeded schedules (market drift, gremlin pressure/spikes, vein spawns,
-// rush windows, contract offers), condition evaluation, and single-verb
-// execution. Everything here is a pure function of its inputs — no Date.now,
-// no Math.random.
+// Pure world mechanics for the ARK settlement: seeded schedules (vein spawns,
+// STORM schedule), milestone gating, and single-ACTION execution (the sim's
+// tick and the oracle's action validation both lean on these). Everything here
+// is a pure function of its inputs — no Date.now, no Math.random.
 
 import {
-  CHARM_MARKET_MAX,
-  CHARM_MARKET_MIN,
-  CHARM_MARKET_SHIFT_TICKS,
-  CHARM_MARKET_STEP_MAX,
-  CONTRACT_BONUS_PER_CHARM,
-  CONTRACT_BONUS_PER_WIDGET,
-  CONTRACT_FIRST_TICK,
-  CONTRACT_PENALTY,
-  CONTRACT_PERIOD,
-  CONTRACT_QTY_CHARMS_MAX,
-  CONTRACT_QTY_CHARMS_MIN,
-  CONTRACT_QTY_WIDGETS_MAX,
-  CONTRACT_QTY_WIDGETS_MIN,
-  CONTRACT_WINDOW_TICKS,
-  CRAFT_MATTER_PER_CHARM,
-  CRAFT_WIDGETS_PER_CHARM,
-  GREMLIN_MAX,
-  GREMLIN_RAMP_TICKS,
-  MARKET_MAX,
-  MARKET_MIN,
-  MARKET_SHIFT_TICKS,
-  REFINE_RATIO,
-  RUSH_FIRST_TICK,
-  RUSH_LEN,
-  RUSH_MULT_MAX,
-  RUSH_MULT_MIN,
-  RUSH_PERIOD,
-  SPIKE_CHANCE_PER_PRESSURE,
-  TOKEN_CAP,
+  ARK_PARTS_REQUIRED,
+  BEACON_PARTS_REQUIRED,
+  CONTRIBUTE_RATE_MAX,
+  CRAFT_RATE_MAX,
+  FARM_RATE_MAX,
+  GATHER_RATE_MAX,
+  GRANARY_PARTS_REQUIRED,
+  ORE_PER_PART,
+  STORE_RATE_MAX,
+  STORM_FIRST_TICK,
+  STORM_JITTER,
+  STORM_PERIOD,
+  STORM_SEVERITY_BASE,
+  STORM_SEVERITY_MAX,
+  STORM_SEVERITY_RAMP,
+  STRUCTURE_HP_PER_PART,
   VEIN_ID_MAX,
   VEIN_RATE_MAX,
   VEIN_RATE_MIN,
@@ -42,85 +28,14 @@ import {
   VEIN_SPAWN_JITTER,
   VEIN_SPAWN_TICKS,
   VEINS_INITIAL,
+  WALL_HP_MAX,
+  WALL_HP_PER_PART,
+  WALL_PARTS_REQUIRED,
 } from './balance.ts'
-import { hashNoise, SALT_CHARM_MARKET, SALT_CONTRACT, SALT_MARKET, SALT_RUSH, SALT_SPIKE, SALT_VEIN } from './noise.ts'
-import type { Good, Script, VeinState, Workshop } from './types.ts'
+import { hashNoise, SALT_STORM, SALT_VEIN } from './noise.ts'
+import { MILESTONE_ORDER, type Action, type Dyad, type SharedStructure, type SimState, type StormSpec, type StructureKind, type VeinState } from './types.ts'
 
-/** The slice of the world the verbs and conditions read. `market` and
- * `marketCharms` are the EFFECTIVE prices right now (rush already applied by
- * the caller) — the tick applies rushAt; the oracle's dry-run deliberately
- * passes BASE prices only (market events are the humans' to see). */
-export interface WorldView {
-  tick: number
-  market: number
-  marketCharms: number
-  gremlin: number
-}
-
-// ── Seeded schedules ─────────────────────────────────────────────────────────
-
-/** Gremlin pressure ramps on a fixed schedule; spikes ride on top of it. */
-export function pressureAt(tick: number): number {
-  return Math.min(GREMLIN_MAX, Math.floor(tick / GREMLIN_RAMP_TICKS))
-}
-
-/** Does the shared gremlin track spike this tick? Seeded, stateless. */
-export function spikeAt(seed: number, tick: number, pressure: number): boolean {
-  if (pressure <= 0) return false
-  return hashNoise(seed, tick, SALT_SPIKE) % 65536 < pressure * SPIKE_CHANCE_PER_PRESSURE
-}
-
-/** Widget market drift: every MARKET_SHIFT_TICKS the BASE rate steps −1/0/+1. */
-export function stepMarket(prev: number, seed: number, tick: number): number {
-  if (tick % MARKET_SHIFT_TICKS !== 0) return prev
-  const step = (hashNoise(seed, tick, SALT_MARKET) % 3) - 1
-  return Math.max(MARKET_MIN, Math.min(MARKET_MAX, prev + step))
-}
-
-/** Charm market drift: its own lane, livelier steps (−2..+2), offset by 2
- * ticks so the two goods never move in lockstep. */
-export function stepCharmMarket(prev: number, seed: number, tick: number): number {
-  if (tick % CHARM_MARKET_SHIFT_TICKS !== 2) return prev
-  const step = (hashNoise(seed, tick, SALT_CHARM_MARKET) % (2 * CHARM_MARKET_STEP_MAX + 1)) - CHARM_MARKET_STEP_MAX
-  return Math.max(CHARM_MARKET_MIN, Math.min(CHARM_MARKET_MAX, prev + step))
-}
-
-// ── RUSH windows (the asymmetry mechanic — see balance.ts) ───────────────────
-
-export interface Rush {
-  good: Good
-  mult: number
-  startTick: number
-  endTick: number // inclusive
-}
-
-/** The rush active at `tick`, or null. Pure f(seed, tick): window w opens at
- * RUSH_FIRST_TICK + w×RUSH_PERIOD for RUSH_LEN ticks; good and mult are
- * seeded per window. Same seed → same rushes — round 2 replays round 1's. */
-export function rushAt(seed: number, tick: number): Rush | null {
-  if (tick < RUSH_FIRST_TICK) return null
-  const w = Math.floor((tick - RUSH_FIRST_TICK) / RUSH_PERIOD)
-  const start = RUSH_FIRST_TICK + w * RUSH_PERIOD
-  if (tick >= start + RUSH_LEN) return null
-  const good: Good = hashNoise(seed, w, SALT_RUSH) % 2 === 0 ? 'widgets' : 'charms'
-  const mult = RUSH_MULT_MIN + (hashNoise(seed, w, SALT_RUSH + 1) % (RUSH_MULT_MAX - RUSH_MULT_MIN + 1))
-  return { good, mult, startTick: start, endTick: start + RUSH_LEN - 1 }
-}
-
-/** Ticks until the NEXT rush window opens after `tick` (board forecast). */
-export function nextRushInTicks(tick: number): number {
-  if (tick < RUSH_FIRST_TICK) return RUSH_FIRST_TICK - tick
-  const w = Math.floor((tick - RUSH_FIRST_TICK) / RUSH_PERIOD)
-  return RUSH_FIRST_TICK + (w + 1) * RUSH_PERIOD - tick
-}
-
-/** Effective price of a good right now: base × the active rush multiplier. */
-export function effectivePrice(seed: number, tick: number, base: number, good: Good): number {
-  const rush = rushAt(seed, tick)
-  return rush && rush.good === good ? base * rush.mult : base
-}
-
-// ── Vein schedule (pure specs — prospect and replay both lean on this) ───────
+// ── Vein schedule (pure specs — kept from the depth update) ─────────────────
 
 export interface VeinSpec {
   id: number
@@ -131,9 +46,7 @@ export interface VeinSpec {
   reserveMax: number
 }
 
-/** Everything about vein k EXCEPT its current reserve — pure f(seed, k), so a
- * prospect can reveal a vein before it surfaces and the round-2 reseed replays
- * the identical field. */
+/** Everything about vein k EXCEPT its current reserve — pure f(seed, k). */
 export function veinSpec(seed: number, k: number): VeinSpec {
   const rate = VEIN_RATE_MIN + (hashNoise(seed, k, SALT_VEIN + 1) % (VEIN_RATE_MAX - VEIN_RATE_MIN + 1))
   const factor = VEIN_RESERVE_FACTOR_MIN + (hashNoise(seed, k, SALT_VEIN + 2) % (VEIN_RESERVE_FACTOR_MAX - VEIN_RESERVE_FACTOR_MIN + 1))
@@ -141,8 +54,8 @@ export function veinSpec(seed: number, k: number): VeinSpec {
   return {
     id: k,
     spawnTick,
-    x: 8 + (hashNoise(seed, k, SALT_VEIN + 3) % 58), // crystal-fields band, left of the stalls
-    y: 8 + (hashNoise(seed, k, SALT_VEIN + 4) % 40),
+    x: 6 + (hashNoise(seed, k, SALT_VEIN + 3) % 88), // scattered across the outer field
+    y: 6 + (hashNoise(seed, k, SALT_VEIN + 4) % 50),
     rate,
     reserveMax: rate * factor,
   }
@@ -154,146 +67,156 @@ export function spawnVein(seed: number, k: number): VeinState {
   return { id: sp.id, x: sp.x, y: sp.y, rate: sp.rate, reserve: sp.reserveMax, reserveMax: sp.reserveMax, spawnedAt: sp.spawnTick }
 }
 
-/** The id of the next vein that has NOT yet surfaced at `tick` (what a
- * prospect reveals), or null when the field is fully surfaced. */
-export function nextVeinId(seed: number, tick: number): number | null {
-  for (let k = VEINS_INITIAL + 1; k <= VEIN_ID_MAX; k++) {
-    if (veinSpec(seed, k).spawnTick > tick) return k
+export { VEIN_ID_MAX }
+
+// ── Storm schedule (pure f(seed, index) — the visible countdown's source) ───
+
+/** Storm k (1-based): when it lands and how hard. Escalates by index. */
+export function stormSpec(seed: number, k: number): StormSpec {
+  const tick = STORM_FIRST_TICK + (k - 1) * STORM_PERIOD + (hashNoise(seed, k, SALT_STORM) % STORM_JITTER)
+  const severity = Math.min(STORM_SEVERITY_MAX, STORM_SEVERITY_BASE + (k - 1) * STORM_SEVERITY_RAMP)
+  return { index: k, tick, severity }
+}
+
+/** The NEXT storm strictly after `tick` — the countdown everyone watches. */
+export function nextStorm(seed: number, tick: number): StormSpec {
+  for (let k = 1; ; k++) {
+    const sp = stormSpec(seed, k)
+    if (sp.tick > tick) return sp
+  }
+}
+
+/** The storm landing exactly at `tick`, if any. */
+export function stormAt(seed: number, tick: number): StormSpec | null {
+  for (let k = 1; ; k++) {
+    const sp = stormSpec(seed, k)
+    if (sp.tick === tick) return sp
+    if (sp.tick > tick) return null
+  }
+}
+
+// ── Structures + milestones ─────────────────────────────────────────────────
+
+export function newStructures(): Record<StructureKind, SharedStructure> {
+  const make = (kind: StructureKind, partsRequired: number, hpMax: number): SharedStructure => ({
+    kind,
+    parts: 0,
+    partsRequired,
+    complete: false,
+    hp: 0,
+    hpMax,
+  })
+  return {
+    wall: make('wall', WALL_PARTS_REQUIRED, WALL_HP_MAX),
+    granary: make('granary', GRANARY_PARTS_REQUIRED, GRANARY_PARTS_REQUIRED * STRUCTURE_HP_PER_PART),
+    beacon: make('beacon', BEACON_PARTS_REQUIRED, BEACON_PARTS_REQUIRED * STRUCTURE_HP_PER_PART),
+    ark: make('ark', ARK_PARTS_REQUIRED, ARK_PARTS_REQUIRED * STRUCTURE_HP_PER_PART),
+  }
+}
+
+/** Milestones unlock in order: wall → granary → beacon → ark. A structure
+ * accepts contributions only when every earlier milestone is complete. */
+export function structureUnlocked(s: SimState, kind: StructureKind): boolean {
+  const i = MILESTONE_ORDER.indexOf(kind)
+  for (let j = 0; j < i; j++) {
+    if (!s.structures[MILESTONE_ORDER[j]].complete) return false
+  }
+  return true
+}
+
+/** The current milestone frontier — the first incomplete structure (null when
+ * the ark is built and the vote is the frontier). */
+export function milestoneFrontier(s: SimState): StructureKind | null {
+  for (const kind of MILESTONE_ORDER) {
+    if (!s.structures[kind].complete) return kind
   }
   return null
 }
 
-// ── Contract offer schedule (round-2 ticks; pure specs) ──────────────────────
+// ── Action execution (one emitted action, validated + applied) ──────────────
 
-export interface ContractSpec {
-  id: number
-  offerTick: number
-  good: Good
-  qty: number
-  windowTicks: number
-  bonus: number
-  penalty: number
+function intParam(a: Action, name: string): number {
+  const v = a[name]
+  return typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : 0
 }
 
-export function contractSpec(seed: number, j: number): ContractSpec {
-  const good: Good = hashNoise(seed, j, SALT_CONTRACT) % 2 === 0 ? 'widgets' : 'charms'
-  const qty =
-    good === 'widgets'
-      ? CONTRACT_QTY_WIDGETS_MIN + (hashNoise(seed, j, SALT_CONTRACT + 1) % (CONTRACT_QTY_WIDGETS_MAX - CONTRACT_QTY_WIDGETS_MIN + 1))
-      : CONTRACT_QTY_CHARMS_MIN + (hashNoise(seed, j, SALT_CONTRACT + 1) % (CONTRACT_QTY_CHARMS_MAX - CONTRACT_QTY_CHARMS_MIN + 1))
-  return {
-    id: j,
-    offerTick: CONTRACT_FIRST_TICK + (j - 1) * CONTRACT_PERIOD,
-    good,
-    qty,
-    windowTicks: CONTRACT_WINDOW_TICKS,
-    bonus: qty * (good === 'widgets' ? CONTRACT_BONUS_PER_WIDGET : CONTRACT_BONUS_PER_CHARM),
-    penalty: CONTRACT_PENALTY,
-  }
+export interface ActionOutcome {
+  applied: boolean
+  note: string
+  /** milestone completed by this action (the tick emits the room-wide event) */
+  completed?: StructureKind
+  contributed?: number
 }
 
-// ── Conditions ───────────────────────────────────────────────────────────────
-
-export function fieldValue(world: WorldView, w: Workshop, field: string): number {
-  switch (field) {
-    case 'tokens': return w.tokens
-    case 'matter': return w.matter
-    case 'widgets': return w.widgets
-    case 'charms': return w.charms
-    case 'gremlin': return world.gremlin
-    case 'market': return world.market
-    case 'marketCharms': return world.marketCharms
-    case 'tick': return world.tick
-    default: return 0 // unreachable for statically-valid scripts
-  }
-}
-
-export function condPasses(world: WorldView, w: Workshop, when?: Script['when']): boolean {
-  if (!when) return true
-  const v = fieldValue(world, w, when.field)
-  switch (when.op) {
-    case '<': return v < when.value
-    case '<=': return v <= when.value
-    case '>': return v > when.value
-    case '>=': return v >= when.value
-    case '==': return v === when.value
-    default: return false
-  }
-}
-
-// ── Verb execution ───────────────────────────────────────────────────────────
-
-/** Numeric param access for statically-valid scripts. */
-function num(script: Script, name: string): number {
-  const v = script.params[name]
-  return typeof v === 'number' ? v : 0
-}
-
-/** Which good a sell script moves (the optional enum param, default widgets). */
-export function sellGood(script: Script): Good {
-  return script.params['good'] === 'charms' ? 'charms' : 'widgets'
-}
-
-/** Execute one verb for one workshop this tick. The script must already be
- * statically valid and its condition must have passed. `mult` is the active
- * boost multiplier; `veins` is the LIVE shared vein list (the tick passes the
- * real one and the oracle's dry-run passes a scratch copy — harvest drains
- * reserve). Returns the patch strength contributed (patch verb only).
- * Mutates `w` (and the bound vein's reserve). */
-export function runVerb(world: WorldView, w: Workshop, script: Script, mult: number, veins: VeinState[]): number {
-  switch (script.verb) {
-    case 'harvest': {
-      const vein = veins.find((v) => v.id === num(script, 'node'))
-      if (!vein || vein.reserve <= 0) return 0 // no vein here / ran dry — idles (lastRun explains)
-      const n = Math.min(num(script, 'rate') * mult, vein.rate * mult, vein.reserve)
+/** Execute ONE emitted action for one dyad. `gated` = may this action touch
+ * shared structures (scope==='shared' && verified — THE DEPLOY GATE)?
+ * Mutates dyad / veins / structures / granaryFood via `s`. Deterministic. */
+export function runAction(s: SimState, d: Dyad, a: Action, gated: boolean): ActionOutcome {
+  switch (a.type) {
+    case 'gather': {
+      const node = intParam(a, 'node')
+      const vein = s.veins.find((v) => v.id === node)
+      if (!vein) return { applied: false, note: `no vein #${node} here (yet)` }
+      if (vein.reserve <= 0) return { applied: false, note: `vein #${node} is dry — re-target` }
+      const n = Math.max(0, Math.min(intParam(a, 'rate'), GATHER_RATE_MAX, vein.rate, vein.reserve))
+      if (n <= 0) return { applied: false, note: `gather rate must be 1..${GATHER_RATE_MAX}` }
       vein.reserve -= n
-      w.matter += n
-      return 0
+      d.ore += n
+      return { applied: true, note: `+${n} ore from vein #${node}` }
     }
-    case 'refine': {
-      const n = Math.min(num(script, 'rate'), Math.floor(w.matter / REFINE_RATIO))
-      if (n > 0) {
-        w.matter -= n * REFINE_RATIO
-        w.widgets += n * mult // inventory only — a widget scores when it SELLS
-      }
-      return 0
+    case 'farm': {
+      const n = Math.max(0, Math.min(intParam(a, 'rate'), FARM_RATE_MAX))
+      if (n <= 0) return { applied: false, note: `farm rate must be 1..${FARM_RATE_MAX}` }
+      d.food += n
+      return { applied: true, note: `+${n} food` }
     }
     case 'craft': {
-      const n = Math.min(
-        num(script, 'rate'),
-        Math.floor(w.matter / CRAFT_MATTER_PER_CHARM),
-        Math.floor(w.widgets / CRAFT_WIDGETS_PER_CHARM),
-      )
-      if (n > 0) {
-        w.matter -= n * CRAFT_MATTER_PER_CHARM
-        w.widgets -= n * CRAFT_WIDGETS_PER_CHARM
-        w.charms += n * mult // inventory only — a charm scores when it SELLS
+      const want = Math.max(0, Math.min(intParam(a, 'amount'), CRAFT_RATE_MAX))
+      if (want <= 0) return { applied: false, note: `craft amount must be 1..${CRAFT_RATE_MAX}` }
+      const n = Math.min(want, Math.floor(d.ore / ORE_PER_PART))
+      if (n <= 0) return { applied: false, note: `starved — a part needs ${ORE_PER_PART} ore` }
+      d.ore -= n * ORE_PER_PART
+      d.parts += n
+      return { applied: true, note: `+${n} part${n === 1 ? '' : 's'} (${n * ORE_PER_PART} ore)` }
+    }
+    case 'contribute': {
+      const kind = a['structure']
+      if (kind !== 'wall' && kind !== 'granary' && kind !== 'beacon' && kind !== 'ark') {
+        return { applied: false, note: `unknown structure '${String(kind)}' — wall|granary|beacon|ark` }
       }
-      return 0
-    }
-    case 'sell': {
-      const good = sellGood(script)
-      const have = good === 'charms' ? w.charms : w.widgets
-      const n = Math.min(num(script, 'amount'), have)
-      if (n > 0) {
-        const price = good === 'charms' ? world.marketCharms : world.market
-        if (good === 'charms') {
-          w.charms -= n
-          w.charmsSold += n
-        } else {
-          w.widgets -= n
-          w.widgetsSold += n
-        }
-        w.tokens = Math.min(TOKEN_CAP, w.tokens + n * price) // over the cap is wasted — it's a rate limit
+      if (!gated) return { applied: false, note: `GATE: contribute refused — shared structures need a VERIFIED shared-scope script` }
+      if (!structureUnlocked(s, kind)) return { applied: false, note: `${kind} is locked — finish the earlier milestone first` }
+      const st = s.structures[kind]
+      const wantRaw = Math.max(0, Math.min(intParam(a, 'amount'), CONTRIBUTE_RATE_MAX))
+      if (wantRaw <= 0) return { applied: false, note: `contribute amount must be 1..${CONTRIBUTE_RATE_MAX}` }
+      // over-contribution only makes sense on the wall (HP repair); elsewhere cap at need
+      const room = kind === 'wall' ? (st.hp >= st.hpMax && st.complete ? 0 : wantRaw) : Math.max(0, st.partsRequired - st.parts)
+      const n = Math.min(wantRaw, d.parts, room === 0 ? 0 : room)
+      if (n <= 0) {
+        return { applied: false, note: d.parts <= 0 ? 'no parts to contribute' : `${kind} needs nothing more` }
       }
-      return 0
+      d.parts -= n
+      d.contributed += n
+      st.parts += n
+      if (kind === 'wall') st.hp = Math.min(st.hpMax, st.hp + n * WALL_HP_PER_PART)
+      else st.hp = Math.min(st.hpMax, st.hp + n * STRUCTURE_HP_PER_PART)
+      let completed: StructureKind | undefined
+      if (!st.complete && st.parts >= st.partsRequired) {
+        st.complete = true
+        completed = kind
+      }
+      return { applied: true, note: `+${n} part${n === 1 ? '' : 's'} → ${kind}`, completed, contributed: n }
     }
-    case 'patch': {
-      return num(script, 'strength')
+    case 'store': {
+      if (!gated) return { applied: false, note: `GATE: store refused — the granary is shared; use a VERIFIED shared-scope script` }
+      if (!s.structures.granary.complete) return { applied: false, note: 'the granary is not built yet' }
+      const n = Math.max(0, Math.min(intParam(a, 'amount'), STORE_RATE_MAX, d.food))
+      if (n <= 0) return { applied: false, note: d.food <= 0 ? 'no food to store' : `store amount must be 1..${STORE_RATE_MAX}` }
+      d.food -= n
+      s.granaryFood += n
+      return { applied: true, note: `+${n} food → granary` }
     }
-    case 'boost': {
-      return 0 // the boost pass handles multipliers and blowups
-    }
+    default:
+      return { applied: false, note: `unknown action '${String(a.type)}' — the settlement doesn't know that move` }
   }
-  return 0
 }

@@ -196,3 +196,65 @@ The build week (from the design doc, D1 = 2026-07-21):
   phase entries).
 - Dry-run still predicts the candidate script in isolation (world schedules
   move, other scripts hold still).
+
+## ★ THE ARK PIVOT (2026-07-22 locked design → shipped)
+
+The rounds/phases party game above is SUPERSEDED. AIMANCER is now the co-op
+ark: one settlement per room, drop-in dyads, REAL Starlark scripts run by the
+aimancer-go engine, THE DEPLOY GATE (district=branch, shared=protected main),
+seeded escalating storms, milestones Wall→Granary→Beacon→ARK, and the
+collective GO/NO-GO launch vote. See README.md + /wiki for the game.
+
+### Design calls of record
+
+- **Replay/engine choice: engine-emitted actions enter the log AS DATA**
+  (`scriptTick` commands), exactly like LLM drafts did pre-pivot. Replays
+  re-apply actions and never re-run the engine. Why: (1) the probe's ruling —
+  engine subprocess faults (timeout/respawn) are SEAT faults, not replay
+  state, and a replay that re-ran the engine would have to reproduce
+  non-deterministic wall-clock faults; (2) engine upgrades can't invalidate
+  old replays (the /log header pins the engine identity that emitted the
+  actions); (3) the sim stays pure TS. Cost: fatter logs — bounded by
+  ACTIONS_PER_TICK_MAX.
+- Per-script KV memory lives server-side only (Room.memories), round-tripped
+  to the engine; it is NOT replay state (actions are). A server restart
+  resets script memory — accepted for v1.
+- The deploy gate is enforced twice: HTTP 409 (server dry-runs before
+  logging) AND in the sim (`deploy scope=shared` without `verified` is
+  unrepresentable; runtime `contribute`/`store` from ungated scripts drop
+  with a public gateRefused event).
+- `verified` follows the LATEST oracle verdict — a red re-check closes the
+  shared gate again (the oracle is the switch, continued).
+- v1 storms only batter the WALL's HP; other structures carry hp/hpMax for
+  the record. Districts have integrity instead.
+- Pacing valve = the VEIN SUPPLY SCHEDULE (250 parts = 1500 ore ≈ ore
+  surfaced by ~tick 240). Smoke's scripted 3-dyad speed-run launches ~tick
+  239 with 4 storms — the 30-45 min meeting band at the 5s tick; tickMs=1000
+  makes the 10-minute room.
+
+### BREAKING HTTP API changes (pre-audience, deliberate)
+
+GONE: `start`/`phase`/`hold` (continuous play), `draft`/`draft-request`
+(write real scripts), `arm`/`disarm` (deploy/undeploy), `scrap`, `prospect`,
+`claim-contract`, the rich/narrow `/state` split (co-op has no fog).
+NEW: `deploy` (scope district|shared; shared runs the gate, 409 + report),
+`undeploy`, `oracle` (engine dry-run), `vote` (HINGE only), `launch` (host
+hinge), `GET /api/templates`. `/state` view is the new RoomView shape;
+`/log` gained the replay header (seed/tickMs/engine identity) and redacts
+other seats' deploy source until launch. aimancer-go client + reference bot
+updated to match.
+
+### Retired deliberately with the phase machine
+
+`shared/sim/flaws.ts`, `shared/apprentice.ts`, `server/apprentice.ts` (the
+hosted-drafts escrow), `scripts/copilot-shim`, `scripts/loom-bots.ps1`, the
+old smoke/wstest suites (their still-true floors — replay identity, token
+economy, vein mechanics, redaction, feed dedup — carried into the new
+suites). Git history keeps them; the D1-D6 notes above are historical.
+
+### Next (the polish day)
+
+- Storm/milestone/launch SFX + art pass (asset-harness).
+- Family playtest → balance pass on storm severity + vein cadence.
+- Board: wall-absorb animation beat + survivor arrivals visual.
+- loom-bots equivalent for the ark (drive 2-3 real agent seats).

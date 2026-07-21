@@ -520,3 +520,64 @@ td.r, th.r { text-align: right; }
 .vein-bar-fill { height: 100%; background: linear-gradient(90deg, #6d5bd0, var(--accent)); transition: width 900ms ease; }
 .vein-row.dry { color: var(--ink-faint); }
 .rush-banner.phone { font-size: var(--t-md); padding: var(--s-1) var(--s-3); }
+
+/* ── ARK PIVOT additions ─────────────────────────────────────────────────── */
+
+/* the storm countdown — the number everyone watches */
+.storm-banner {
+  display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap;
+  padding: var(--s-2) var(--s-3); border-radius: 10px;
+  border: 1px solid var(--line); background: var(--panel);
+}
+.storm-banner .storm-icon { font-size: 1.4em; }
+.storm-near { border-color: #b8860b; background: color-mix(in oklab, #b8860b 12%, var(--panel)); }
+.storm-imminent {
+  border-color: #c0392b; background: color-mix(in oklab, #c0392b 18%, var(--panel));
+  animation: stormpulse 1s ease-in-out infinite;
+}
+@keyframes stormpulse { 50% { box-shadow: 0 0 18px 2px rgba(192, 57, 43, 0.55); } }
+
+/* milestone bars */
+.ms-row { display: flex; align-items: center; gap: var(--s-2); }
+.ms-label { min-width: 110px; font-size: var(--t-sm); letter-spacing: 0.04em; }
+.ms-bar { height: 10px; border-radius: 6px; background: var(--line); overflow: hidden; flex: 1; min-width: 40px; }
+.ms-fill { height: 100%; background: var(--accent); transition: width 0.6s ease; }
+.ms-fill.ms-low { background: #c0392b; }
+.ms-done .ms-fill { background: var(--ok-strong, #2e8b57); }
+.ms-done .ms-label { color: var(--ok-strong, #2e8b57); }
+.ms-frontier .ms-label { color: var(--accent); font-weight: 700; }
+
+/* the settlement map layers */
+.wallring {
+  position: absolute; left: 50%; top: 46%; width: 46%; aspect-ratio: 1.6;
+  transform: translate(-50%, -50%); border-radius: 50%;
+  border: 4px dashed color-mix(in oklab, var(--accent) 70%, transparent);
+  pointer-events: none; transition: opacity 0.6s ease;
+}
+.wallring.done { border-style: solid; box-shadow: 0 0 22px -4px var(--accent); }
+.ark-center {
+  position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center; gap: 3px; z-index: 3;
+}
+.ark-body { font-size: 2.6em; transition: filter 0.6s ease; }
+.works-chip {
+  position: absolute; transform: translate(-50%, -50%); z-index: 2;
+  display: flex; flex-direction: column; align-items: center; font-size: 1.5em;
+  opacity: 0.45;
+}
+.works-chip.built { opacity: 1; filter: drop-shadow(0 0 6px var(--accent)); }
+.district-chip {
+  position: absolute; transform: translate(-50%, -50%); z-index: 4;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 3px 7px; font-size: var(--t-sm);
+}
+.district-chip .dname { font-weight: 600; }
+.district-chip .dscripts { font-size: var(--t-xs, 0.7rem); letter-spacing: 0.1em; }
+.district-chip.hurt { border-color: #b8860b; }
+.district-chip.rubble { border-color: #c0392b; opacity: 0.7; filter: saturate(0.4); }
+
+/* feed + phone bits */
+.theater-good { color: var(--ok-strong, #2e8b57); font-weight: 600; }
+.vote-panel { border-color: var(--accent); box-shadow: 0 0 16px -6px var(--accent); }
+.logline { padding-left: var(--s-3); }

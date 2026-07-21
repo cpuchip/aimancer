@@ -1,4 +1,4 @@
-# AIMANCER.
+# AIMANCER — ARK PIVOT.
 # Deploy: Dokploy builds this compose and routes aimancer.cpuchip.net -> game:8080
 #         via Traefik over the internal network (no host port published — the VPS
 #         runs several apps that all listen on 8080 in-container).
@@ -12,13 +12,16 @@ services:
     restart: unless-stopped
     environment:
       - PORT=8080
-      # Apprentice LLM (optional — unset = practice mode, still fully playable).
-      # Set the values in the deploy environment (Dokploy env), never here.
-      - APPRENTICE_BASE_URL=${APPRENTICE_BASE_URL:-}
-      - APPRENTICE_MODEL_CHEAP=${APPRENTICE_MODEL_CHEAP:-}
-      - APPRENTICE_MODEL_SMART=${APPRENTICE_MODEL_SMART:-}
-      - APPRENTICE_API_KEY=${APPRENTICE_API_KEY:-}
-      - APPRENTICE_TIMEOUT_MS=${APPRENTICE_TIMEOUT_MS:-}
+      # Engine wall-clock budget per script run (ms). The engine's gas meter
+      # bounds VM steps; this bounds real time (hostile single-op scripts) —
+      # timeout ⇒ kill + respawn, seat fault only. See server/engine.ts.
+      - ENGINE_TIMEOUT_MS=${ENGINE_TIMEOUT_MS:-2000}
+    # THE HARD WALL behind the engine's own allocation watchdog: a hostile
+    # script can spike memory inside a single op before the watchdog's cancel
+    # lands (engine package doc), so the CONTAINER memory limit is the final
+    # backstop. Node + engine fit comfortably; a runaway hits this and the
+    # container restarts (restart: unless-stopped).
+    mem_limit: 768m
     expose:
       - "8080"
     healthcheck:

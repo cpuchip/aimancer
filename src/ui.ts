@@ -1,113 +1,52 @@
-// Client-side presentation helpers: auto-generated script names, verb icons,
-// plain-words param/condition descriptions, and prediction summaries.
-// Deliberately HONEST: a hallucinated verb or param is displayed as written —
-// spotting it by reading (or paying the oracle) is the game.
+// Client-side presentation helpers for the ARK settlement. Deliberately
+// HONEST: script names, notes, and errors render as the sim recorded them.
 
-import { saltOf } from '../shared/sim/noise.ts'
-import type { Script } from '../shared/sim/types.ts'
-import type { OracleReport } from '../shared/sim/oracle.ts'
+import type { StructureKind } from '../shared/sim/types.ts'
 
-const VERB_NOUN: Record<string, string> = {
-  harvest: 'Harvester',
-  refine: 'Refinery',
-  craft: 'Charmforge',
-  sell: 'Vendotron',
-  patch: 'Patchbot',
-  boost: 'Overclocker',
+export const STRUCTURE_ICON: Record<StructureKind, string> = {
+  wall: '🧱',
+  granary: '🌾',
+  beacon: '🗼',
+  ark: '🚀',
 }
 
-export const VERB_ICON: Record<string, string> = {
-  harvest: '⛏️',
-  refine: '⚙️',
-  craft: '🧿',
-  sell: '💰',
-  patch: '🛡️',
-  boost: '🚀',
+export const STRUCTURE_LABEL: Record<StructureKind, string> = {
+  wall: 'THE WALL',
+  granary: 'GRANARY',
+  beacon: 'BEACON',
+  ark: 'THE ARK',
 }
 
-const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII']
-
-/** "Harvester Mk-II" — deterministic from the script (same id → same name). */
-export function scriptName(script: Script): string {
-  const noun = VERB_NOUN[script.verb] ?? script.verb.charAt(0).toUpperCase() + script.verb.slice(1)
-  return `${noun} Mk-${ROMAN[saltOf(script.id) % ROMAN.length]}`
+export function scopeBadge(scope: string): string {
+  return scope === 'shared' ? 'SHARED' : 'district'
 }
 
-export function verbIcon(verb: string): string {
-  return VERB_ICON[verb] ?? '❓'
+export function statusIcon(sc: { status: string; verified: boolean }): string {
+  if (sc.status === 'killed') return '🌪💀'
+  if (sc.status === 'stopped') return '⏸'
+  return sc.verified ? '🟢' : '🧨'
 }
 
-/** Generated art for the five REAL verbs (brass/indigo set, /assets). A
- * hallucinated verb gets null → the emoji fallback renders it as written
- * (display-honesty rule): no icon is itself a tell worth reading. */
-export const VERB_ICON_SRC: Record<string, string> = {
-  harvest: '/assets/verb_harvest.png',
-  refine: '/assets/verb_refine.png',
-  sell: '/assets/verb_sell.png',
-  patch: '/assets/verb_patch.png',
-  boost: '/assets/verb_boost.png',
-}
-
-export function verbIconSrc(verb: string): string | null {
-  return VERB_ICON_SRC[verb] ?? null
-}
-
-/** Params in plain words, one line each. Unknown params render raw — the
- * apprentice wrote them; reading them is your job (or the oracle's). */
-export function describeParams(script: Script): string[] {
-  const lines: string[] = []
-  for (const [k, v] of Object.entries(script.params)) {
-    if (script.verb === 'harvest' && k === 'rate') lines.push(`gathers ${v} matter each tick`)
-    else if (script.verb === 'harvest' && k === 'node') lines.push(`bound to vein #${v}`)
-    else if (script.verb === 'refine' && k === 'rate') lines.push(`crafts up to ${v} widget${v === 1 ? '' : 's'} each tick (3 matter each)`)
-    else if (script.verb === 'craft' && k === 'rate') lines.push(`forges up to ${v} charm${v === 1 ? '' : 's'} each tick (2 matter + 1 widget each)`)
-    else if (script.verb === 'sell' && k === 'amount') lines.push(`sells up to ${v} each tick at market price`)
-    else if (script.verb === 'sell' && k === 'good') lines.push(`sells ${v}`)
-    else if (script.verb === 'patch' && k === 'strength') lines.push(`soaks ${v} gremlin damage each tick`)
-    else if (script.verb === 'boost' && k === 'mult') lines.push(`multiplies your other scripts ×${v} — risky`)
-    else lines.push(`${k}: ${v}`)
-  }
-  if (lines.length === 0) lines.push('(no parameters)')
-  return lines
-}
-
-export function describeCondition(script: Script): string | null {
-  const c = script.when
-  if (!c) return null
-  return `runs only while ${c.field} ${c.op} ${c.value}`
-}
-
-/** One-line digest of the oracle's 3-tick dry-run. */
-export function predictionSummary(report: OracleReport): string | null {
-  const pr = report.prediction
-  if (!pr || pr.length === 0) return null
-  const ran = pr.filter((p) => p.ran).length
-  if (ran === 0) return `next ${pr.length} ticks: idle (condition holds it back)`
-  const sum = pr.reduce(
-    (a, p) => ({ tokens: a.tokens + p.tokens, matter: a.matter + p.matter, widgets: a.widgets + p.widgets, charms: a.charms + (p.charms ?? 0) }),
-    { tokens: 0, matter: 0, widgets: 0, charms: 0 },
-  )
-  const parts: string[] = []
-  const fmt = (n: number, icon: string) => `${n > 0 ? '+' : ''}${n}${icon}`
-  if (sum.matter !== 0) parts.push(fmt(sum.matter, '⛏'))
-  if (sum.widgets !== 0) parts.push(fmt(sum.widgets, '⚙'))
-  if (sum.charms !== 0) parts.push(fmt(sum.charms, '🧿'))
-  if (sum.tokens !== 0) parts.push(fmt(sum.tokens, '⚡'))
-  if (parts.length === 0) parts.push('no yield')
-  return `next ${pr.length} ticks: ${parts.join(' ')}`
-}
-
-/** mm:ss for the wall-clock round countdown. */
+/** mm:ss for wall-clock countdowns. */
 export function fmtClock(ms: number): string {
   const s = Math.max(0, Math.ceil(ms / 1000))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-/** Phase banner copy — one job per screen, one line per phase. */
-export const PHASE_BANNER: Record<string, { title: string; sub: string }> = {
-  lobby: { title: 'LOBBY', sub: 'waiting for the host' },
-  round1: { title: 'ROUND 1 — NAIVE', sub: 'no oracle exists · arm and pray' },
-  intermission: { title: 'INTERMISSION', sub: 'world frozen · stock your hand' },
-  round2: { title: 'ROUND 2 — VERIFIED', sub: 'the oracle is online · same world, second chance' },
-  reveal: { title: 'THE REVEAL', sub: 'round 1 vs round 2 — the delta tells the story' },
+/** District chip position around the settlement ring (percent coords for the
+ * map canvas — index spreads dyads evenly around the lower arc). */
+export function districtPos(index: number, count: number): { x: number; y: number } {
+  const n = Math.max(1, count)
+  const angle = Math.PI * (0.15 + (0.7 * (index + 0.5)) / n) // lower arc, left→right
+  return {
+    x: 50 + 34 * Math.cos(Math.PI - angle),
+    y: 58 + 30 * Math.sin(angle) * 0.55,
+  }
+}
+
+/** Storm danger color class by how close it is. */
+export function stormUrgency(inTicks: number): 'calm' | 'near' | 'imminent' {
+  if (inTicks <= 3) return 'imminent'
+  if (inTicks <= 10) return 'near'
+  return 'calm'
 }
