@@ -1,13 +1,25 @@
 <script lang="ts">
-  // JOIN page (D1 placeholder): PIN + name → seat; your hand as JSON cards
-  // with Oracle/Arm buttons wired through the HINGE token; drafts go through
-  // the WORKER token (today the human plays apprentice — D3 adds the AI).
+  // The PHONE — one job per screen (Jackbox discipline):
+  //   join → lobby → your workshop (hand of CARDS) → reveal.
+  // Drafts go through the WORKER token ("practice apprentice" — the hosted one
+  // is D3); Oracle/Arm/YOLO/Scrap act per card; the HINGE token stays here.
   import { clientKey, wsUrl } from './net.ts'
   import { mulberry32 } from '../shared/rng.ts'
   import { flawScript, sampleScript } from '../shared/sim/flaws.ts'
-  import { VERB_PARAMS } from '../shared/sim/balance.ts'
+  import {
+    DRAFT_COST_CHEAP,
+    DRAFT_COST_SMART,
+    ORACLE_COST,
+    PRACTICE_FLAW_CHEAP_PCT,
+    PRACTICE_FLAW_SMART_PCT,
+    TOKEN_REGEN,
+    VERB_PARAMS,
+  } from '../shared/sim/balance.ts'
+  import { describeEvent, freshEvents, newFeedCursor } from '../shared/eventFeed.ts'
+  import { PHASE_BANNER, describeCondition, describeParams, predictionSummary, scriptName, verbIcon } from './ui.ts'
   import type { ClientMessage, RoomView, ServerMessage } from '../shared/protocol.ts'
-  import type { DraftTier, Script } from '../shared/sim/types.ts'
+  import type { OracleReport } from '../shared/sim/oracle.ts'
+  import type { DraftTier, Script, ScriptSlot, SimPhase } from '../shared/sim/types.ts'
 
   let pin = $state('')
   let name = $state('')
@@ -19,12 +31,12 @@
   let started = $state(false)
   let view = $state<RoomView | null>(null)
   let lastError = $state('')
-  let reports = $state<Record<string, string>>({})
+  let reports = $state<Record<string, OracleReport>>({})
   let tickMs = $state(25000)
-  let tier = $state<DraftTier>('cheap')
   let customJson = $state('')
   let draftSerial = 1
   let eventLog = $state<string[]>([])
+  const feedCursor = newFeedCursor()
 
   let ws: WebSocket | null = null
   const flawPrng = mulberry32(Date.now() >>> 0) // client-side comedy only — the sim never sees this PRNG
@@ -50,13 +62,14 @@
       if (msg.type === 'snapshot') {
         view = msg.view
         started = msg.view.started
-        for (const e of msg.view.events) {
-          eventLog = [JSON.stringify(e), ...eventLog].slice(0, 30)
+        const names = (i: number) => msg.view.players[i]?.name ?? `P${i}`
+        for (const e of freshEvents(feedCursor, msg.view.events, msg.view.eventSeq)) {
+          eventLog = [describeEvent(e, names), ...eventLog].slice(0, 30)
         }
       }
       if (msg.type === 'error') lastError = msg.message
       if (msg.type === 'oracleReport') {
-        reports = { ...reports, [msg.id]: JSON.stringify(msg.report, null, 1) }
+        reports = { ...reports, [msg.id]: msg.report }
       }
     }
     ws.onclose = () => {
@@ -69,128 +82,222 @@
     return `${name.toLowerCase().slice(0, 6) || 'me'}-${draftSerial++}-${Math.floor(Math.random() * 1000)}`
   }
 
-  function draft(script: Script): void {
+  /** The PRACTICE apprentice (D1 stub; the hosted one is D3): a random verb,
+   * plausible params, sometimes a condition — and a tier-dependent chance the
+   * whole thing is a confident hallucination. You won't be told which. */
+  function askApprentice(tier: DraftTier): void {
+    const verbs = Object.keys(VERB_PARAMS)
+    const verb = verbs[Math.floor(flawPrng() * verbs.length) % verbs.length]
+    const s = sampleScript(verb, nextId())
+    for (const sp of VERB_PARAMS[verb] ?? []) {
+      // smart drafts lean toward stronger params; cheap drafts wander
+      const span = sp.max - sp.min
+      const roll = tier === 'smart' ? 0.5 + flawPrng() * 0.5 : flawPrng()
+      s.params[sp.name] = sp.min + Math.round(span * roll)
+    }
+    if (flawPrng() < 0.35) {
+      const conds: Script['when'][] = [
+        { field: 'market', op: '>=', value: 5 },
+        { field: 'matter', op: '>', value: 6 },
+        { field: 'gremlin', op: '<', value: 5 },
+        { field: 'widgets', op: '>', value: 2 },
+      ]
+      s.when = conds[Math.floor(flawPrng() * conds.length) % conds.length]
+    }
+    const flawPct = tier === 'smart' ? PRACTICE_FLAW_SMART_PCT : PRACTICE_FLAW_CHEAP_PCT
+    const script = flawPrng() * 100 < flawPct ? flawScript(s, flawPrng).script : s
     send({ type: 'draft', token: workerToken, script, tier })
   }
-  function draftVerb(verb: string): void {
-    const s = sampleScript(verb, nextId())
-    // mid-range params read better than minimums for a demo
-    for (const sp of VERB_PARAMS[verb] ?? []) s.params[sp.name] = Math.floor((sp.min + sp.max) / 2)
-    draft(s)
-  }
-  function draftFlawed(): void {
-    const verbs = Object.keys(VERB_PARAMS)
-    const base = sampleScript(verbs[Math.floor(Math.random() * verbs.length)], nextId())
-    draft(flawScript(base, flawPrng).script) // the hallucination — will the oracle catch it, or will you YOLO?
-  }
+
   function draftCustom(): void {
     try {
-      draft(JSON.parse(customJson))
+      send({ type: 'draft', token: workerToken, script: JSON.parse(customJson), tier: 'cheap' })
     } catch {
       lastError = 'custom draft is not valid JSON'
     }
   }
 
+  function advancePhase(): void {
+    const next: Record<string, SimPhase | null> = { round1: 'intermission', intermission: 'round2', round2: 'reveal', reveal: null }
+    const to = next[view?.phase ?? '']
+    if (to) send({ type: 'phase', token: hingeToken, to })
+  }
+
+  const ADVANCE_LABEL: Record<string, string> = {
+    round1: '▶ Call intermission',
+    intermission: '▶ Begin ROUND 2',
+    round2: '▶ The reveal',
+  }
+
+  function statusChip(card: ScriptSlot): { cls: string; label: string } {
+    if (card.status === 'dead') return { cls: 'dead', label: '💀 dead' }
+    if (card.status === 'blown') return { cls: 'blown', label: '🔥 blown' }
+    if (card.status === 'autoDisarmed') return { cls: 'benched', label: '🔌 benched' }
+    if (card.armed) return card.yolo ? { cls: 'yolo', label: '🧨 YOLO — live' } : { cls: 'armed', label: '✓ armed' }
+    if (card.status === 'disarmed') return { cls: 'drafted', label: '⏸ disarmed' }
+    return { cls: 'drafted', label: 'draft' }
+  }
+
   const me = $derived(view?.you ?? null)
   const myShop = $derived(view && me ? view.players[me.index] : null)
+  const phase = $derived(view?.phase ?? 'lobby')
+  const banner = $derived(PHASE_BANNER[phase] ?? PHASE_BANNER.lobby)
+  const oracleAvailable = $derived(phase === 'round2')
+  const canAct = $derived(phase !== 'reveal')
+  const myDelta = $derived(view?.delta && me ? view.delta.players[me.index] : null)
 </script>
 
-<h1>AIMANCER</h1>
-
 {#if !joined}
-  <div class="card">
-    <input placeholder="your name" bind:value={name} maxlength="16" />
-    <input placeholder="room PIN (4 letters)" bind:value={pin} maxlength="4" style="text-transform:uppercase" />
-    <button onclick={() => connect(false)} disabled={!name || pin.length !== 4}>Join room</button>
-    <button onclick={() => connect(true)} disabled={!name}>Create room</button>
-    <p class="muted">Big screen: open <code>#/board/PIN</code> on the room's PIN.</p>
+  <h1>AIMANCER</h1>
+  <p class="muted">Your AI apprentice drafts the scripts. Only YOU can arm them.</p>
+  <div class="card stack">
+    <input placeholder="your name" bind:value={name} maxlength="16" autocomplete="off" />
+    <input placeholder="room PIN (4 letters)" bind:value={pin} maxlength="4" style="text-transform:uppercase" autocomplete="off" />
+    <button class="primary" onclick={() => connect(false)} disabled={!name || pin.length !== 4}>Join room</button>
+    <button onclick={() => connect(true)} disabled={!name}>Create a room</button>
+    <p class="faint">Big screen: open <span class="mono">#/board/PIN</span> on the projector.</p>
   </div>
 {:else}
-  <div class="bar">
-    <span>room <b>{room}</b></span>
-    <span><a href={'#/board/' + room} target="_blank">board ↗</a></span>
-    {#if view}
-      <span>tick {view.tick}</span>
-      <span>market {view.market}</span>
-      <span>gremlin {view.gremlin}</span>
+  <div class="phase-banner phase-{phase}">
+    <span class="title">{banner.title}</span>
+    <span class="sub">{banner.sub}</span>
+    {#if view && (phase === 'round1' || phase === 'round2') && view.ticksRemaining !== null}
+      <span class="count num">{view.ticksRemaining}⏱</span>
     {/if}
   </div>
 
   {#if !started}
-    <div class="card">
-      <p>Waiting to start…</p>
+    <div class="card stack">
+      <div class="row"><span class="muted">room</span> <b class="mono" style="font-size:var(--t-xl); letter-spacing:0.2em">{room}</b></div>
+      <p class="muted">Waiting for the host to start. Board: <a href={'#/board/' + room} target="_blank">open ↗</a></p>
       {#if isHost}
         <select bind:value={tickMs}>
           <option value={25000}>show tick — 25s</option>
           <option value={5000}>quick tick — 5s</option>
           <option value={2000}>dev tick — 2s</option>
         </select>
-        <button class="arm" onclick={() => send({ type: 'start', token: hingeToken, tickMs })}>Start game (hinge)</button>
+        <button class="primary" onclick={() => send({ type: 'start', token: hingeToken, tickMs })}>Start the game</button>
+        <p class="faint">Round lengths: 12 + 19 ticks (defaults).</p>
       {/if}
     </div>
-  {/if}
-
-  {#if myShop}
-    <div class="bar">
-      <span>⚡ tokens <b>{myShop.tokens}</b></span>
-      <span>⛏ matter <b>{myShop.matter}</b></span>
-      <span>⚙ widgets <b>{myShop.widgets}</b></span>
-      <span>score <b>{myShop.score}</b></span>
-      <span>waste {myShop.waste}</span>
-    </div>
-  {/if}
-
-  {#if lastError}<p class="err">✗ {lastError}</p>{/if}
-
-  {#if started}
-    <h2>Draft (worker surface — you are the apprentice today)</h2>
-    <div class="card">
-      <select bind:value={tier}>
-        <option value="cheap">cheap model draft (3⚡)</option>
-        <option value="smart">smart model draft (8⚡)</option>
-      </select>
-      {#each Object.keys(VERB_PARAMS) as verb (verb)}
-        <button onclick={() => draftVerb(verb)}>{verb}</button>
-      {/each}
-      <button onclick={() => draftFlawed()}>hallucinate 🎲</button>
-      <textarea rows="3" placeholder={'custom script JSON, e.g. {"id":"x1","verb":"harvest","params":{"rate":3}}'} bind:value={customJson}></textarea>
-      <button onclick={() => draftCustom()} disabled={!customJson}>draft custom</button>
-    </div>
-
-    <h2>Your hand</h2>
-    {#if me && me.hand.length === 0}<p class="muted">No scripts yet — draft something.</p>{/if}
-    {#each me?.hand ?? [] as card (card.script.id)}
-      <div class="card {card.armed ? 'armed' : ''} {card.status === 'dead' || card.status === 'blown' ? 'dead' : ''}">
-        <div class="bar">
-          <span><b>{card.script.id}</b></span>
-          <span>{card.status}</span>
-          {#if card.armed}<span>{card.yolo ? '⚠ YOLO' : '✓ verified'}</span>{/if}
-          {#if card.lastVerdict}<span class={card.lastVerdict.ok ? 'ok' : 'err'}>{card.lastVerdict.ok ? 'oracle: green' : 'oracle: RED'}</span>{/if}
-        </div>
-        <pre>{JSON.stringify(card.script, null, 1)}</pre>
-        {#if card.lastVerdict && !card.lastVerdict.ok}
-          <p class="err">{card.lastVerdict.reasons.join(' · ')}</p>
-        {/if}
-        {#if reports[card.script.id]}
-          <pre>{reports[card.script.id]}</pre>
-        {/if}
-        <button class="oracle" onclick={() => send({ type: 'oracle', token: hingeToken, id: card.script.id })}>Oracle (4⚡)</button>
-        {#if card.armed}
-          <button onclick={() => send({ type: 'disarm', token: hingeToken, id: card.script.id })}>Disarm</button>
-        {:else if card.status !== 'dead' && card.status !== 'blown'}
-          <button class="arm" onclick={() => send({ type: 'arm', token: hingeToken, id: card.script.id })}>ARM {card.everGreen ? '' : '(YOLO)'}</button>
-        {/if}
+  {:else}
+    {#if myShop}
+      <div class="stats">
+        <span class="stat">⚡ <b class="num">{myShop.tokens}</b> +{TOKEN_REGEN}/tick</span>
+        <span class="stat">⛏ <b class="num">{myShop.matter}</b></span>
+        <span class="stat">⚙ <b class="num">{myShop.widgets}</b></span>
+        <span class="stat">★ <b class="num">{myShop.score}</b></span>
       </div>
-    {/each}
+    {/if}
 
-    <h2>Events</h2>
+    {#if lastError}<p class="err">✗ {lastError}</p>{/if}
+
+    {#if isHost && phase !== 'reveal'}
+      <button class="ghost" style="width:100%" onclick={advancePhase}>{ADVANCE_LABEL[phase] ?? '▶'}</button>
+    {/if}
+
+    {#if phase === 'reveal'}
+      {#if myDelta}
+        <div class="card stack">
+          <h2 style="margin-top:0">Your delta</h2>
+          <div class="row" style="font-size:var(--t-xl)">
+            <span class="num">{myDelta.r1.score}</span>
+            <span class="muted">→</span>
+            <span class="num">{myDelta.r2.score}</span>
+            <span class={myDelta.dScore >= 0 ? 'delta-pos' : 'delta-neg'}>{myDelta.dScore >= 0 ? '+' : ''}{myDelta.dScore}</span>
+          </div>
+          <p class="muted">
+            disasters {myDelta.r1.disasters} → {myDelta.r2.disasters} ·
+            sold {myDelta.r1.widgetsSold} → {myDelta.r2.widgetsSold} ·
+            waste {myDelta.r1.waste} → {myDelta.r2.waste}
+          </p>
+          <p class="faint">The room's full story is on the big screen.</p>
+        </div>
+      {/if}
+    {:else}
+      {#if phase === 'intermission' && view?.round1Summary}
+        <div class="card">
+          <h2 style="margin-top:0">Round 1 — how it went</h2>
+          <p class="muted">score {view.round1Summary.players[me?.index ?? 0]?.score ?? 0} · disasters {view.round1Summary.players[me?.index ?? 0]?.disasters ?? 0}. The world is frozen — draft now, arm in round 2.</p>
+        </div>
+      {/if}
+
+      <h2>Practice apprentice <span class="faint">(the real one arrives D3)</span></h2>
+      <div class="row">
+        <button class="grow" onclick={() => askApprentice('cheap')} disabled={!canAct}>🤖 Ask for a draft — cheap ({DRAFT_COST_CHEAP}⚡)</button>
+        <button class="grow" onclick={() => askApprentice('smart')} disabled={!canAct}>🧠 smart ({DRAFT_COST_SMART}⚡)</button>
+      </div>
+
+      <h2>Your hand</h2>
+      {#if me && me.hand.length === 0}
+        <div class="card"><p class="muted" style="margin:0">No scripts yet — ask your apprentice for a draft.</p></div>
+      {/if}
+      {#each me?.hand ?? [] as card (card.script.id)}
+        {@const chip = statusChip(card)}
+        {@const report = reports[card.script.id]}
+        {@const gone = card.status === 'dead' || card.status === 'blown'}
+        <div class="script-card {gone ? 'gone' : card.armed ? (card.yolo ? 'armed-yolo' : 'armed-ok') : ''}">
+          <div class="row">
+            <span>{verbIcon(card.script.verb)}</span>
+            <span class="name">{scriptName(card.script)}</span>
+            <span class="chip {chip.cls}">{chip.label}</span>
+            {#if card.lastVerdict}
+              <span class="chip {card.lastVerdict.ok ? 'green' : 'red'}">{card.lastVerdict.ok ? '🔮 green' : '🔮 RED'}</span>
+            {/if}
+          </div>
+          <div class="desc">
+            {#each describeParams(card.script) as line, i (i)}<div>{line}</div>{/each}
+            {#if describeCondition(card.script)}<div>⏳ {describeCondition(card.script)}</div>{/if}
+            <div class="faint mono">{card.script.verb} · {card.script.id}</div>
+          </div>
+          {#if card.lastVerdict && !card.lastVerdict.ok}
+            <div class="verdict red">{card.lastVerdict.reasons.join(' · ')}</div>
+          {:else if report && report.ok}
+            <div class="verdict green">
+              {predictionSummary(report)}
+              {#if report.reasons.length}<div class="faint">{report.reasons.join(' · ')}</div>{/if}
+            </div>
+          {/if}
+          {#if !gone && canAct}
+            <div class="actions">
+              <button class="oracle" disabled={!oracleAvailable} title={oracleAvailable ? '' : "the oracle hasn't been invented yet"}
+                onclick={() => send({ type: 'oracle', token: hingeToken, id: card.script.id })}>
+                🔮 Oracle {oracleAvailable ? `${ORACLE_COST}⚡` : '(round 2)'}
+              </button>
+              {#if card.armed}
+                <button onclick={() => send({ type: 'disarm', token: hingeToken, id: card.script.id })}>⏸ Disarm</button>
+              {:else if card.everGreen}
+                <button class="armok" onclick={() => send({ type: 'arm', token: hingeToken, id: card.script.id })}>✅ ARM</button>
+              {:else}
+                <button class="yolo" onclick={() => send({ type: 'arm', token: hingeToken, id: card.script.id })}>🧨 YOLO-ARM</button>
+              {/if}
+              {#if !card.armed}
+                <button class="ghost" onclick={() => send({ type: 'scrap', token: hingeToken, id: card.script.id })}>🗑 Scrap</button>
+              {/if}
+            </div>
+          {:else if gone}
+            <div class="actions">
+              <button class="ghost" onclick={() => send({ type: 'scrap', token: hingeToken, id: card.script.id })}>🗑 Scrap the wreck</button>
+            </div>
+          {/if}
+        </div>
+      {/each}
+
+      <details>
+        <summary class="muted">advanced: hand-write a script</summary>
+        <textarea rows="3" placeholder={'{"id":"x1","verb":"harvest","params":{"rate":3}}'} bind:value={customJson}></textarea>
+        <button onclick={() => draftCustom()} disabled={!customJson || !canAct}>draft custom ({DRAFT_COST_CHEAP}⚡)</button>
+      </details>
+    {/if}
+
+    <h2>Workshop feed</h2>
     <div class="events">
-      {#each eventLog as line, i (i)}<div class="muted">{line}</div>{/each}
+      {#each eventLog as line, i (i)}<div>{line}</div>{/each}
     </div>
 
     <details>
-      <summary class="muted">agent tokens (D3/D4: hand these to your apprentice)</summary>
-      <pre>worker: {workerToken}
+      <summary class="faint">agent tokens (D3/D4: hand these to your apprentice)</summary>
+      <pre class="mono faint" style="white-space:pre-wrap;word-break:break-all">worker: {workerToken}
 (the hinge token stays on YOUR phone)</pre>
     </details>
   {/if}
