@@ -24,7 +24,8 @@ import { freshEvents, newFeedCursor } from '../shared/eventFeed.ts'
 import { CODE_ALPHABET, ROUND2_TICKS_DEFAULT, seedFromCode } from '../shared/mpConfig.ts'
 import { DRAFT_COST_CHEAP, DRAFT_COST_SMART, ORACLE_COST, TOKEN_START } from '../shared/sim/balance.ts'
 import { staticCheck } from '../shared/sim/oracle.ts'
-import type { SimEvent } from '../shared/sim/types.ts'
+import { apply, newGame, score, tick, ticksRunning } from '../shared/sim/sim.ts'
+import type { Command, SimEvent } from '../shared/sim/types.ts'
 import type { ClientMessage, RoomLogView, RoomView, ServerMessage } from '../shared/protocol.ts'
 
 const PORT = 18643
@@ -212,6 +213,9 @@ async function main(): Promise<void> {
     APPRENTICE_MODEL_CHEAP: 'fake-cheap',
     APPRENTICE_MODEL_SMART: 'fake-smart',
     APPRENTICE_TIMEOUT_MS: '1500',
+    // fast auto-advance so the real path runs inside the suite (defaults 8s/20s)
+    AUTO_ADVANCE_MS: '1200',
+    AUTO_DWELL_MS: '600',
   })
   let practiceServer: ReturnType<typeof spawn> | null = null
   server.stderr!.on('data', (d: Buffer) => process.stderr.write(d))
@@ -255,7 +259,7 @@ async function main(): Promise<void> {
     // 60s tick = the world holds still for this room, so every assertion below
     // is deterministic (no gremlin spike can disturb the fixture mid-test).
     // A second room further down proves the auto-tick loop.
-    alice.send({ type: 'start', token: alice.welcome!.hingeToken, tickMs: 60000 })
+    alice.send({ type: 'start', token: alice.welcome!.hingeToken, tickMs: 60000, autoAdvance: false })
     await alice.waitView((v) => v.started, 'game started')
     ok(alice.view!.tickMs === 60000, 'tick length is a room setting')
     ok(alice.view!.players.length === 2, 'two workshops in the world')
@@ -316,7 +320,7 @@ async function main(): Promise<void> {
     const carol = new TestClient('key-carol', 'Carol')
     await carol.open('')
     await carol.waitFor((m) => m.type === 'welcome', 'carol welcome')
-    carol.send({ type: 'start', token: carol.welcome!.hingeToken, tickMs: 300, round1Ticks: 2 })
+    carol.send({ type: 'start', token: carol.welcome!.hingeToken, tickMs: 300, round1Ticks: 2, autoAdvance: false })
     await carol.waitView((v) => v.tick >= 2, 'ticks advance')
     ok(true, 'the room ticks the sim on its own cadence and pushes snapshots (auto-refresh proof)')
     await new Promise((r) => setTimeout(r, 900)) // 3 tick intervals of silence
@@ -533,7 +537,7 @@ async function main(): Promise<void> {
     await dave.open('')
     await dave.waitFor((m) => m.type === 'welcome', 'dave welcome')
     const davePin = dave.welcome!.room
-    dave.send({ type: 'start', token: dave.welcome!.hingeToken, tickMs: 60000 })
+    dave.send({ type: 'start', token: dave.welcome!.hingeToken, tickMs: 60000, autoAdvance: false })
     await dave.waitView((v) => v.started, 'dave started')
     ok(dave.view!.apprentice === 'live', "state says apprentice: 'live' (a model is wired)")
 
@@ -691,7 +695,7 @@ async function main(): Promise<void> {
         body: JSON.stringify(bodyObj ?? {}),
       })
 
-    const createRes = await post('/api/room', null, { name: 'Hera', tickMs: 60000, round1Ticks: 3, round2Ticks: 3 })
+    const createRes = await post('/api/room', null, { name: 'Hera', tickMs: 60000, round1Ticks: 3, round2Ticks: 3, autoAdvance: false })
     const hera = await createRes.json()
     ok(createRes.status === 200 && hera.ok && new RegExp(`^[${CODE_ALPHABET}]{4}$`).test(hera.pin), `HTTP create opens a room (${hera.pin})`)
     ok(hera.seat === 0 && hera.workerToken.startsWith('w_') && hera.hingeToken.startsWith('h_'), 'HTTP creator seated as HOST (seat 0) with both tokens')
@@ -716,6 +720,8 @@ async function main(): Promise<void> {
     ok(!ap.includes(`/api/room/${hera.pin}/arm`), 'the paste-prompt teaches NO arm endpoint')
     ok(ap.toLowerCase().includes('approve the curl') && ap.toLowerCase().includes('arms on their phone'), 'the paste-prompt keeps the covenant: approve-the-curl + your-human-arms-on-their-phone')
     ok(ap.toLowerCase().includes('never bypass'), 'the paste-prompt forbids bypassing the agent\'s own permission prompts')
+    ok(ap.includes('KEEP PLAYING') && ap.toLowerCase().includes('never faster than 3s'), 'the paste-prompt teaches the MONITORING loop (poll politely, react to change)')
+    ok(ap.includes('lastRun') && ap.includes('"reveal": STOP'), 'monitoring covers per-script yield + the stop-at-reveal rule')
     ok((await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt?token=${ivan.hingeToken}`)).status === 403, 'agent-prompt with a HINGE token → 403 (wrong surface to ask)')
     ok((await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt`)).status === 401, 'agent-prompt with no token → 401')
 
@@ -745,6 +751,123 @@ async function main(): Promise<void> {
     const stEnd = await (await fetch(`${BASE}/api/room/${hera.pin}/state`, { headers: { authorization: `Bearer ${ivan.workerToken}` } })).json()
     const h2end = stEnd.view.you.hand.find((sl: { script: { id: string } }) => sl.script.id === 'h2')
     ok(h2end && h2end.armed === true && h2end.yolo === false && h2end.everGreen === true, 'FULL HTTP LIFECYCLE PROVEN: create → join → draft → oracle → arm → state, no websocket anywhere')
+
+    // ── HOTFIX: auto-advance (default ON) + hold + OFF-manual + liveness ─────
+    // The server runs AUTO_ADVANCE_MS=1200 / AUTO_DWELL_MS=600 (env) so the
+    // REAL path — budget spent → countdown → server-issued logged phase
+    // command — completes inside the suite.
+
+    // (1) default ON: nobody sends a single phase command in this room
+    const auto = new TestClient('key-auto', 'Auto')
+    await auto.open('')
+    await auto.waitFor((m) => m.type === 'welcome', 'auto welcome')
+    const autoPin = auto.welcome!.room
+    auto.send({ type: 'start', token: auto.welcome!.hingeToken, tickMs: 300, round1Ticks: 2, round2Ticks: 2 })
+    await auto.waitView((v) => v.started, 'auto room started')
+    ok(auto.view!.autoAdvance === true, 'autoAdvance DEFAULTS ON (no flag passed at start)')
+    await auto.waitView((v) => v.phase === 'intermission', 'auto → intermission')
+    ok(true, 'round-1 budget exhaustion AUTO-advances to intermission (the silent freeze is gone)')
+    ok(
+      auto.snapshotRaws.some((r) => {
+        const v = (JSON.parse(r) as { view: RoomView }).view
+        return v.phase === 'round1' && v.autoAdvanceIn !== null
+      }),
+      'the visible countdown (autoAdvanceIn) crossed the wire before the advance',
+    )
+    await auto.waitView((v) => v.phase === 'round2', 'auto → round2')
+    ok(true, 'the intermission auto-advances after the dwell (summary stays readable)')
+    await auto.waitView((v) => v.phase === 'reveal', 'auto → reveal')
+    ok(true, 'round-2 budget exhaustion auto-advances to the reveal')
+    await new Promise((r) => setTimeout(r, 1800))
+    ok(auto.view!.phase === 'reveal', 'the reveal NEVER auto-advances (waited 1.8s > countdown)')
+
+    // the auto advances are ordinary LOGGED host phase commands → replayable
+    const autoLog = await (await fetch(`${BASE}/api/room/${autoPin}/log`, { headers: { authorization: `Bearer ${auto.welcome!.hingeToken}` } })).json()
+    const phaseCmds = (autoLog.log as Array<{ atTick: number; cmd: { t: string; to?: string } }>).filter((e) => e.cmd.t === 'phase')
+    ok(phaseCmds.length === 3 && phaseCmds.map((e) => e.cmd.to).join(',') === 'intermission,round2,reveal', 'all three auto-advances are LOGGED phase commands (replay carries them)')
+    // REPLAY DETERMINISM on the real path: seed + served log, replayed locally,
+    // matches the served end state (segment ticks by the phase entries)
+    const rsim = newGame(seedFromCode(autoPin), 1, ['Auto'], autoLog.phaseTicks)
+    for (const { atTick, cmd } of autoLog.log as Array<{ atTick: number; cmd: Command }>) {
+      let guard = 0
+      while (rsim.tick < atTick && guard++ < 1000) tick(rsim)
+      apply(rsim, cmd)
+    }
+    let runOut = 0
+    while (ticksRunning(rsim) && runOut++ < 1000) tick(rsim)
+    const servedEnd = (await (await fetch(`${BASE}/api/room/${autoPin}/state`, { headers: { authorization: `Bearer ${auto.welcome!.workerToken}` } })).json()).view
+    ok(
+      rsim.phase === 'reveal' && rsim.tick === servedEnd.tick && rsim.players[0].tokens === servedEnd.players[0].tokens && score(rsim.players[0]) === servedEnd.players[0].score,
+      `replay determinism intact: local replay of seed+log matches the served state (tick ${rsim.tick}, tokens ${rsim.players[0].tokens})`,
+    )
+    auto.close()
+
+    // (2) HOLD: the host can suspend a pending countdown; manual advance resumes auto
+    const holdC = new TestClient('key-hold', 'Holdy')
+    await holdC.open('')
+    await holdC.waitFor((m) => m.type === 'welcome', 'hold welcome')
+    const holdPin = holdC.welcome!.room
+    holdC.send({ type: 'start', token: holdC.welcome!.hingeToken, tickMs: 300, round1Ticks: 1, round2Ticks: 1 })
+    await holdC.waitView((v) => v.phase === 'round1' && v.autoAdvanceIn !== null, 'hold-room countdown visible')
+    const holdWorker = await fetch(`${BASE}/api/room/${holdPin}/hold`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${holdC.welcome!.workerToken}`, 'content-type': 'application/json' },
+      body: '{}',
+    })
+    ok(holdWorker.status === 403, 'HTTP hold with the WORKER token → 403 (holding is a host-hinge act)')
+    holdC.send({ type: 'hold', token: holdC.welcome!.hingeToken })
+    await holdC.waitView((v) => v.autoHeld === true && v.autoAdvanceIn === null, 'held')
+    await new Promise((r) => setTimeout(r, 2000))
+    ok(holdC.view!.phase === 'round1' && holdC.view!.autoHeld === true, 'HOLD sticks: no advance while held (2s > the 1.2s countdown)')
+    holdC.send({ type: 'phase', token: holdC.welcome!.hingeToken, to: 'intermission' })
+    await holdC.waitView((v) => v.phase === 'intermission', 'held phase advances only when the host calls it')
+    await holdC.waitView((v) => v.phase === 'round2', 'auto-advance resumes after the manual call (hold is per-phase)')
+    ok(true, 'hold → manual call → auto resumes next phase')
+    holdC.close()
+
+    // (3) OFF preserves manual behavior — budget exhaustion just freezes, loudly
+    const man = new TestClient('key-manual', 'Manny')
+    await man.open('')
+    await man.waitFor((m) => m.type === 'welcome', 'manual welcome')
+    man.send({ type: 'start', token: man.welcome!.hingeToken, tickMs: 300, round1Ticks: 1, autoAdvance: false })
+    await man.waitView((v) => v.started && v.autoAdvance === false, 'manual room started with autoAdvance OFF')
+    await man.waitView((v) => v.phase === 'round1' && v.ticksRemaining === 0, 'manual budget spent')
+    await new Promise((r) => setTimeout(r, 2500))
+    ok(man.view!.phase === 'round1' && man.view!.autoAdvanceIn === null, 'OFF: no countdown, no advance — the host owns the weave (the talk mode)')
+    man.send({ type: 'phase', token: man.welcome!.hingeToken, to: 'intermission' })
+    await man.waitView((v) => v.phase === 'intermission', 'manual host advance still works')
+    await new Promise((r) => setTimeout(r, 2200))
+    ok(man.view!.phase === 'intermission', 'OFF: the intermission holds too (2.2s > dwell+countdown)')
+    man.close()
+
+    // (4) agent liveness: HTTP worker calls mark the dyad live; the phone's own
+    // agent-prompt fetch must NOT (it would false-positive every seat)
+    const dyad = await (await post('/api/room', null, { name: 'Dya', tickMs: 60000, autoAdvance: false })).json()
+    ok((await post(`/api/room/${dyad.pin}/start`, dyad.hingeToken)).status === 200, 'dyad room started')
+    const stA = (await (await fetch(`${BASE}/api/room/${dyad.pin}/state`)).json()).view
+    ok(stA.players[0].agentSeenAgoMs === null, 'no worker call yet → agentSeenAgoMs null (no agent connected)')
+    await fetch(`${BASE}/api/room/${dyad.pin}/agent-prompt?token=${dyad.workerToken}`)
+    const stB = (await (await fetch(`${BASE}/api/room/${dyad.pin}/state`)).json()).view
+    ok(stB.players[0].agentSeenAgoMs === null, "the phone's agent-prompt fetch does NOT count as a live agent")
+    await fetch(`${BASE}/api/room/${dyad.pin}/state`, { headers: { authorization: `Bearer ${dyad.workerToken}` } })
+    const stC = (await (await fetch(`${BASE}/api/room/${dyad.pin}/state`)).json()).view
+    ok(typeof stC.players[0].agentSeenAgoMs === 'number' && stC.players[0].agentSeenAgoMs < 5000, `a worker-token API call marks the agent LIVE (${stC.players[0].agentSeenAgoMs}ms ago)`)
+    ok(!JSON.stringify(stC).includes(dyad.workerToken) && !JSON.stringify(stC).includes(dyad.hingeToken), 'liveness is a timestamp only — no token material in the public view')
+
+    // (5) per-script lastRun: the agent sees its own yield; the public stays fate-only
+    const yld = await (await post('/api/room', null, { name: 'Yield', tickMs: 300, round1Ticks: 5, autoAdvance: false })).json()
+    ok((await post(`/api/room/${yld.pin}/start`, yld.hingeToken)).status === 200, 'yield room started')
+    ok((await post(`/api/room/${yld.pin}/draft`, yld.workerToken, { script: { id: 'y1', verb: 'harvest', params: { rate: 2 } }, tier: 'cheap' })).status === 200, 'yield draft landed')
+    ok((await post(`/api/room/${yld.pin}/arm`, yld.hingeToken, { id: 'y1' })).status === 200, 'yield armed')
+    await new Promise((r) => setTimeout(r, 800))
+    const ySt = (await (await fetch(`${BASE}/api/room/${yld.pin}/state`, { headers: { authorization: `Bearer ${yld.workerToken}` } })).json()).view
+    const y1 = ySt.you.hand.find((sl: { script: { id: string } }) => sl.script.id === 'y1')
+    ok(y1?.lastRun && y1.lastRun.ran === true && y1.lastRun.note === '+2 matter', `own-seat /state carries lastRun — agents can see per-script yield (${y1?.lastRun?.note})`)
+    const yPub = (await (await fetch(`${BASE}/api/room/${yld.pin}/state`)).json()).view
+    ok(
+      yPub.players[0].scripts.length > 0 && yPub.players[0].scripts.every((sc: Record<string, unknown>) => !('lastRun' in sc) && !('script' in sc)),
+      'public script views stay fate-only — no lastRun, no bodies',
+    )
 
     // ── PRACTICE MODE: a second server with NO model wired ───────────────────
     // The env value is an UNINTERPOLATED compose literal — the exact string the
@@ -781,7 +904,7 @@ async function main(): Promise<void> {
     })
     praWs.send(JSON.stringify({ type: 'join', room: '', name: 'Erin', key: 'key-erin' } satisfies ClientMessage))
     const praWelcome = (await praWait((m) => m.type === 'welcome', 'practice welcome')) as Extract<ServerMessage, { type: 'welcome' }>
-    praWs.send(JSON.stringify({ type: 'start', token: praWelcome.hingeToken, tickMs: 60000 } satisfies ClientMessage))
+    praWs.send(JSON.stringify({ type: 'start', token: praWelcome.hingeToken, tickMs: 60000, autoAdvance: false } satisfies ClientMessage))
     await praWait((m) => m.type === 'snapshot' && m.view.started, 'practice started')
     praWs.send(JSON.stringify({ type: 'draftRequest', token: praWelcome.workerToken, tier: 'cheap' } satisfies ClientMessage))
     const praDone = (await praWait(

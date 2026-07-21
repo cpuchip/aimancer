@@ -169,6 +169,51 @@ textarea { font-family: var(--font-mono); font-size: var(--t-sm); min-height: 72
 .phase-reveal { background: var(--raised); border-color: rgb(167 139 250 / 0.35); box-shadow: var(--glow); }
 .phase-reveal .title { color: var(--accent); }
 
+/* the LOUD round-end state — the silent freeze, made unmissable */
+.phase-banner.complete {
+  background: var(--warn-muted);
+  border-color: var(--warn-strong);
+  animation: completePulse 1.4s infinite;
+}
+.phase-banner.complete .title { color: var(--warn-strong); letter-spacing: 0.1em; }
+@keyframes completePulse {
+  50% { box-shadow: 0 0 26px rgb(251 191 36 / 0.35); border-color: rgb(251 191 36 / 0.45); }
+}
+button.advance-hot { animation: completePulse 1.4s infinite; font-size: var(--t-lg); }
+
+/* dismissible teaching nudges — small, non-blocking */
+.hint {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  background: var(--accent-soft);
+  border: 1px solid rgb(167 139 250 / 0.35);
+  border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-sm);
+  margin: var(--s-2) 0;
+}
+.hint span { flex: 1; }
+.hint button.x { background: none; border: none; color: var(--ink-faint); min-height: 0; padding: var(--s-1); font-weight: 400; }
+
+/* how-to-play — always there, never in the way */
+.howto { margin: var(--s-2) 0; }
+.howto summary { cursor: pointer; color: var(--ink-soft); font-weight: 600; padding: var(--s-2) 0; }
+.howto ol { margin: var(--s-2) 0; padding-left: var(--s-5); }
+.howto li { margin: var(--s-1) 0; color: var(--ink-soft); }
+.howto li b { color: var(--ink); }
+
+/* per-script yield line — a starved script must not look like a dead one */
+.lastrun { font-family: var(--font-mono); font-size: var(--t-xs); }
+.lastrun.live { color: var(--ok-strong); }
+.lastrun.idle { color: var(--warn-strong); }
+
+/* board: agent liveness dot + lobby teach steps */
+.agent-dot { opacity: 0.18; filter: grayscale(1); margin-left: var(--s-1); }
+.agent-dot.live { opacity: 1; filter: none; }
+.lobby-steps { display: flex; justify-content: center; gap: var(--s-5); flex-wrap: wrap; margin: var(--s-4) 0; font-size: var(--t-lg); color: var(--ink-soft); }
+.lobby-steps b { color: var(--accent); margin-right: var(--s-1); }
+
 /* ── top stat bar ────────────────────────────────────────────────────────── */
 .stats {
   display: flex;

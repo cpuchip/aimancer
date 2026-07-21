@@ -91,6 +91,12 @@ export function predictionSummary(report: OracleReport): string | null {
   return `next ${pr.length} ticks: ${parts.join(' ')}`
 }
 
+/** mm:ss for the wall-clock round countdown. */
+export function fmtClock(ms: number): string {
+  const s = Math.max(0, Math.ceil(ms / 1000))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
 /** Phase banner copy — one job per screen, one line per phase. */
 export const PHASE_BANNER: Record<string, { title: string; sub: string }> = {
   lobby: { title: 'LOBBY', sub: 'waiting for the host' },

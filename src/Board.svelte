@@ -7,7 +7,7 @@
   import { flip } from 'svelte/animate'
   import { wsUrl } from './net.ts'
   import { describeEvent, freshEvents, isDisaster, newFeedCursor } from '../shared/eventFeed.ts'
-  import { PHASE_BANNER } from './ui.ts'
+  import { PHASE_BANNER, fmtClock } from './ui.ts'
   import type { LobbyPlayer, RoomView, ServerMessage } from '../shared/protocol.ts'
 
   const { pin }: { pin: string } = $props()
@@ -23,6 +23,11 @@
   let prevMarket: number | null = null
   let prevGremlin: number | null = null
 
+  // wall-clock round countdown, interpolated between snapshots
+  let snapAt = $state(0)
+  let clockNow = $state(0)
+  setInterval(() => (clockNow = performance.now()), 500)
+
   const ws = new WebSocket(wsUrl())
   ws.onopen = () => ws.send(JSON.stringify({ type: 'watch', room: pin }))
   ws.onmessage = (ev) => {
@@ -33,6 +38,7 @@
     }
     if (msg.type === 'snapshot') {
       const v = msg.view
+      snapAt = performance.now()
       if (prevMarket !== null && v.market !== prevMarket) marketTrend = v.market > prevMarket ? 'up' : 'down'
       if (prevGremlin !== null && v.gremlin !== prevGremlin) gremlinTrend = v.gremlin > prevGremlin ? 'up' : 'down'
       prevMarket = v.market
@@ -57,6 +63,30 @@
   const banner = $derived(PHASE_BANNER[phase] ?? PHASE_BANNER.lobby)
   const trendGlyph = (t: 'up' | 'down' | 'flat') => (t === 'up' ? '▲' : t === 'down' ? '▼' : '·')
 
+  // ── round-end + auto-advance surfacing (the "silent freeze" hotfix) ────────
+  const roundComplete = $derived(view !== null && (phase === 'round1' || phase === 'round2') && view.ticksRemaining === 0)
+  const autoIn = $derived(view?.autoAdvanceIn ?? null)
+  const bannerTitle = $derived(roundComplete ? `${phase === 'round1' ? 'ROUND 1' : 'ROUND 2'} COMPLETE` : banner.title)
+  const bannerSub = $derived(
+    roundComplete
+      ? autoIn !== null
+        ? `advancing in ${autoIn}… — the host can hold or call it now`
+        : view?.autoHeld
+          ? 'held — the host calls it from their phone'
+          : "waiting for the host to call it (host: it's the big button on your phone)"
+      : phase === 'intermission' && autoIn !== null
+        ? `round 2 in ${autoIn}s — the host can hold`
+        : banner.sub,
+  )
+  const roundClockMs = $derived.by(() => {
+    if (!view || (phase !== 'round1' && phase !== 'round2')) return null
+    const tr = view.ticksRemaining
+    if (tr === null || tr <= 0 || view.nextTickInMs === null) return null
+    return Math.max(0, (tr - 1) * view.tickMs + view.nextTickInMs - (clockNow - snapAt))
+  })
+  /** A seat's agent is "live" if it spoke on the worker surface within 60s. */
+  const agentLive = (agoMs: number | null) => agoMs !== null && agoMs + (clockNow - snapAt) < 60_000
+
   function fateIcon(sc: { status: string; armed: boolean; yolo: boolean }): string {
     if (sc.status === 'dead') return '💀'
     if (sc.status === 'blown') return '🔥'
@@ -72,11 +102,13 @@
     <span class="wordmark">AIMANCER</span>
     <span class="muted board-tag">your apprentice drafts · only a human arms</span>
   </div>
-  <div class="phase-banner phase-{phase}">
-    <span class="title">{banner.title}</span>
-    <span class="sub">{banner.sub}</span>
-    {#if view && (phase === 'round1' || phase === 'round2') && view.ticksRemaining !== null}
-      <span class="count num">{view.ticksRemaining} {view.ticksRemaining === 1 ? 'tick' : 'ticks'} left</span>
+  <div class="phase-banner phase-{phase}{roundComplete ? ' complete' : ''}">
+    <span class="title">{bannerTitle}</span>
+    <span class="sub">{bannerSub}</span>
+    {#if roundClockMs !== null && view}
+      <span class="count num">{fmtClock(roundClockMs)} <span class="muted" style="font-size:var(--t-md)">· {view.ticksRemaining} {view.ticksRemaining === 1 ? 'tick' : 'ticks'}</span></span>
+    {:else if autoIn !== null}
+      <span class="count num">▶ {autoIn}s</span>
     {/if}
   </div>
 
@@ -96,12 +128,18 @@
   {#if !view || !view.started}
     <div class="card lobby-hero" style="text-align:center; padding:var(--s-7)">
       <img class="lobby-emblem" src="/assets/emblem.png" alt="" />
+      <p class="muted" style="font-size:var(--t-xl); margin:0">join at <b style="color:var(--ink)">{location.host}</b> · PIN</p>
       <div style="font-size:var(--t-3xl); font-weight:700; letter-spacing:0.3em">{pin}</div>
-      <p class="muted" style="font-size:var(--t-lg)">grab your phone · {location.host} · enter the PIN</p>
+      <div class="lobby-steps">
+        <span><b>1</b> join on your phone</span>
+        <span><b>2</b> connect your agent (copy the prompt)</span>
+        <span><b>3</b> host starts the game</span>
+      </div>
+      <p class="muted" style="font-size:var(--t-lg)">sell widgets · verified scripts survive · YOLO and pray</p>
       {#if lobbyPlayers.length}
         <p style="font-size:var(--t-lg)">
           {#each lobbyPlayers as p (p.index)}
-            <span class="chip drafted" style="margin:0 var(--s-1)">{p.name}{p.online ? '' : ' (away)'}</span>
+            <span class="chip drafted" style="margin:0 var(--s-1)">{agentLive(p.agentSeenAgoMs) ? '🤖 ' : ''}{p.name}{p.online ? '' : ' (away)'}</span>
           {/each}
         </p>
       {/if}
@@ -187,7 +225,10 @@
             {#each ranked as p, i (p.index)}
               <tr animate:flip={{ duration: 400 }}>
                 <td class="num muted">{i + 1}</td>
-                <td>{p.name}{p.online ? '' : ' 💤'}</td>
+                <td>
+                  {p.name}{p.online ? '' : ' 💤'}
+                  <span class="agent-dot {agentLive(p.agentSeenAgoMs) ? 'live' : ''}" title={agentLive(p.agentSeenAgoMs) ? 'agent connected' : 'no agent'}>🤖</span>
+                </td>
                 <td class="r num score-cell">
                   {#key p.score}<span class="pop">{p.score}</span>{/key}
                 </td>

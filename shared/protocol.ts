@@ -11,6 +11,9 @@ export interface LobbyPlayer {
   index: number
   name: string
   online: boolean
+  /** ms since this seat's agent last spoke on the HTTP worker surface (null =
+   * no agent yet). Liveness only — never token material. */
+  agentSeenAgoMs: number | null
 }
 
 /** What EVERYONE may see of a script: existence and fate, never the body. */
@@ -26,6 +29,9 @@ export interface PlayerView {
   index: number
   name: string
   online: boolean
+  /** ms since this seat's agent last spoke on the HTTP worker surface (null =
+   * no agent yet) — the board's dyad indicator. Liveness only, never tokens. */
+  agentSeenAgoMs: number | null
   score: number
   tokens: number
   matter: number
@@ -46,6 +52,16 @@ export interface RoomView {
   tick: number
   phase: Phase // 'lobby' until the host starts; then the sim's phase
   ticksRemaining: number | null // countdown within the current round (null = unlimited)
+  /** Room setting: auto-issue the host `phase` command when the budget is spent. */
+  autoAdvance: boolean
+  /** Seconds until the room auto-advances (visible countdown window only —
+   * null during the intermission dwell, when held, or when OFF). */
+  autoAdvanceIn: number | null
+  /** Host tapped HOLD — auto-advance suspended until the host calls it. */
+  autoHeld: boolean
+  /** ms until the next world tick fires (null = the world holds still) — the
+   * wall-clock round countdown anchors on this. */
+  nextTickInMs: number | null
   market: number
   gremlin: number
   events: SimEvent[]
@@ -64,8 +80,9 @@ export interface RoomView {
 export type ClientMessage =
   | { type: 'join'; room: string; name: string; key: string } // room '' → create a new room
   | { type: 'watch'; room: string } // spectator (the big screen)
-  | { type: 'start'; token: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number } // host hinge only
+  | { type: 'start'; token: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number; autoAdvance?: boolean } // host hinge only
   | { type: 'phase'; token: string; to: SimPhase } // host hinge only — advance the weave
+  | { type: 'hold'; token: string } // host hinge only — suspend a pending auto-advance
   | { type: 'draft'; token: string; script: Script; tier: DraftTier } // WORKER token — direct draft (custom/BYO)
   | { type: 'draftRequest'; token: string; tier: DraftTier; order?: string } // either token — ask the apprentice (async)
   | { type: 'oracle'; token: string; id: string } // either token (verification is safe)

@@ -15,6 +15,7 @@ import {
   MARKET_BASE,
   MAX_SCRIPTS,
   ORACLE_COST,
+  REFINE_RATIO,
   SCORE_PER_UPTIME,
   SCORE_PER_WIDGET,
   SCORE_WASTE_MULT,
@@ -150,7 +151,7 @@ function reseedRound2(s: SimState): void {
     w.waste = 0
     w.scripts = w.scripts
       .filter((sl) => sl.status === 'drafted')
-      .map((sl) => ({ script: sl.script, armed: false, everGreen: false, yolo: false, status: 'drafted' as const, lastVerdict: null }))
+      .map((sl) => ({ script: sl.script, armed: false, everGreen: false, yolo: false, status: 'drafted' as const, lastVerdict: null, lastRun: null }))
     // w.pending carries as-is: the request was paid, the drafts are still owed
   }
 }
@@ -255,6 +256,7 @@ export function apply(s: SimState, cmd: Command): void {
         yolo: false,
         status: 'drafted',
         lastVerdict: null,
+        lastRun: null,
       })
       emit(s, { t: 'drafted', player: p, id: cmd.script.id, tier: cmd.tier })
       return
@@ -343,6 +345,28 @@ export function apply(s: SimState, cmd: Command): void {
 
 // ── The tick ─────────────────────────────────────────────────────────────────
 
+/** The per-script legibility line: what ran, what it moved, in plain words.
+ * Pure function of the deltas — replays reproduce it exactly. */
+function yieldNote(verb: string, dTokens: number, dMatter: number, dWidgets: number, strength: number): string {
+  switch (verb) {
+    case 'harvest':
+      return `+${dMatter} matter`
+    case 'refine':
+      return dWidgets > 0 ? `+${dWidgets} widget${dWidgets === 1 ? '' : 's'} (${dMatter} matter)` : `starved — needs ${REFINE_RATIO} matter per widget`
+    case 'sell':
+      return dWidgets < 0 ? `sold ${-dWidgets} → +${dTokens}⚡` : 'nothing to sell'
+    case 'patch':
+      return `soaking ${strength} gremlin damage`
+    default: {
+      const parts: string[] = []
+      if (dMatter !== 0) parts.push(`${dMatter > 0 ? '+' : ''}${dMatter} matter`)
+      if (dWidgets !== 0) parts.push(`${dWidgets > 0 ? '+' : ''}${dWidgets} widgets`)
+      if (dTokens !== 0) parts.push(`${dTokens > 0 ? '+' : ''}${dTokens}⚡`)
+      return parts.length ? parts.join(' · ') : 'no effect'
+    }
+  }
+}
+
 function misfire(s: SimState, w: Workshop, p: number, slot: ScriptSlot, v: Verdict): void {
   slot.armed = false
   slot.status = 'dead'
@@ -401,12 +425,16 @@ export function tick(s: SimState): void {
     let mult = 1
     for (const slot of w.scripts) {
       if (!slot.armed || slot.script.verb !== 'boost') continue
-      if (!condPasses(s, w, slot.script.when)) continue
+      if (!condPasses(s, w, slot.script.when)) {
+        slot.lastRun = { tick: s.tick, ran: false, note: 'idle — condition false', dTokens: 0, dMatter: 0, dWidgets: 0 }
+        continue
+      }
       const m = slot.script.params['mult']
       const roll = hashNoise(s.seed, s.tick, saltOf(`${p}:${slot.script.id}`)) % 65536
       if (roll < (m - 1) * BOOST_RISK_PER_STEP) {
         slot.armed = false
         slot.status = 'blown'
+        slot.lastRun = { tick: s.tick, ran: true, note: 'BLEW UP', dTokens: 0, dMatter: -Math.min(w.matter, BOOST_BLOWUP_MATTER_LOSS), dWidgets: 0 }
         w.waste += BOOST_BLOWUP_WASTE
         w.disasters++
         w.matter = Math.max(0, w.matter - BOOST_BLOWUP_MATTER_LOSS)
@@ -414,6 +442,7 @@ export function tick(s: SimState): void {
         continue
       }
       mult = Math.max(mult, m)
+      slot.lastRun = { tick: s.tick, ran: true, note: `boost ×${m} live`, dTokens: 0, dMatter: 0, dWidgets: 0 }
       w.uptime += 1
     }
 
@@ -424,8 +453,27 @@ export function tick(s: SimState): void {
       if (!slot.armed) continue
       if (slot.yolo) buggy++ // unverified armed scripts are the gremlin's attack surface
       if (slot.script.verb === 'boost') continue // already handled
-      if (!condPasses(s, w, slot.script.when)) continue
+      if (!condPasses(s, w, slot.script.when)) {
+        slot.lastRun = { tick: s.tick, ran: false, note: 'idle — condition false', dTokens: 0, dMatter: 0, dWidgets: 0 }
+        continue
+      }
+      // capture what THIS script moved — the per-script legibility line (a
+      // starved duplicate must be distinguishable from a dead one)
+      const t0 = w.tokens
+      const m0 = w.matter
+      const g0 = w.widgets
       patchTotal += runVerb(s, w, slot.script, mult)
+      const dTokens = w.tokens - t0
+      const dMatter = w.matter - m0
+      const dWidgets = w.widgets - g0
+      slot.lastRun = {
+        tick: s.tick,
+        ran: true,
+        note: yieldNote(slot.script.verb, dTokens, dMatter, dWidgets, slot.script.params['strength'] ?? 0),
+        dTokens,
+        dMatter,
+        dWidgets,
+      }
       w.uptime += 1
     }
     patchTotals.push(patchTotal)

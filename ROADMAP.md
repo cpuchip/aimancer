@@ -43,7 +43,22 @@ The build week (from the design doc, D1 = 2026-07-21):
       tick 7).** Gates: smoke 196 · wstest 149.
 - [ ] **D5** — presentation weave (round switcher, delta board, replay
       theater) + assets + polish.
-- [ ] **D6** — family+Dave playtest → fix → dress rehearsal.
+- [ ] **D6** — family+Dave playtest → fix → dress rehearsal. **★ HOTFIX 1
+      (live playtest 07-21): the silent budget-freeze is gone** — round-end is
+      LOUD (COMPLETE banner + pulsing host advance + waiting line) and rooms
+      **auto-advance by default** (`autoAdvance` room setting, host can
+      uncheck for the talk; server issues the same logged host `phase`
+      command after a visible ~8s countdown; intermission dwells 20s first;
+      reveal never advances; ws+HTTP `hold` suspends it). Plus teachability:
+      how-to-play overlay (5 beats), contextual nudges (arm nudge, oracle
+      callout, lobby hints), board-lobby join steps + goal line, tier-bet
+      subtext (rates from balance.ts), oracle-deal subtext, wall-clock
+      mm:ss round countdown (board+phone, `nextTickInMs` anchored),
+      **agent-liveness** (`lastWorkerSeenAt` per seat → `agentSeenAgoMs`;
+      phone dyad line + board 🤖 dots; agent-prompt fetch excluded),
+      **per-script `lastRun` yield** (sim-tracked, own-seat only — starved ≠
+      dead; agents read it in /state) and the paste-prompt's KEEP PLAYING
+      monitoring section. Gates: smoke 203 · wstest 174.
 
 ## D4 rulings + notes (for the D5 brief)
 

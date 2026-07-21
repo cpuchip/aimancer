@@ -57,6 +57,21 @@ export interface Verdict {
   reasons: string[]
 }
 
+/** What an ARMED script actually did on its most recent tick — the
+ * legibility line ("a starved duplicate is indistinguishable from a dead
+ * one" hotfix). Pure function of the tick, so replays reproduce it exactly.
+ * Own-seat/own-agent only: public views stay fate-only. */
+export interface ScriptRun {
+  tick: number
+  /** Condition passed and the verb executed (false = idle this tick). */
+  ran: boolean
+  /** Plain words: '+4 matter' · 'starved — needs 3 matter' · 'idle — condition false'. */
+  note: string
+  dTokens: number
+  dMatter: number
+  dWidgets: number
+}
+
 export interface ScriptSlot {
   script: Script
   armed: boolean
@@ -66,6 +81,8 @@ export interface ScriptSlot {
   yolo: boolean
   status: SlotStatus
   lastVerdict: Verdict | null
+  /** Most recent armed-tick outcome (null until it first runs). */
+  lastRun: ScriptRun | null
 }
 
 // ── Phases (the 40-minute weave, in the sim so replays carry it) ─────────────

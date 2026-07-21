@@ -6,14 +6,16 @@
   // Oracle/Arm/YOLO/Scrap act per card; the HINGE token stays here.
   import { clientKey, wsUrl } from './net.ts'
   import {
+    APPRENTICE_FLAW_CHEAP_PCT,
+    APPRENTICE_FLAW_SMART_PCT,
     DRAFT_COST_CHEAP,
     DRAFT_COST_SMART,
     ORACLE_COST,
     TOKEN_REGEN,
   } from '../shared/sim/balance.ts'
   import { describeEvent, freshEvents, newFeedCursor } from '../shared/eventFeed.ts'
-  import { PHASE_BANNER, describeCondition, describeParams, predictionSummary, scriptName, verbIcon, verbIconSrc } from './ui.ts'
-  import type { ClientMessage, RoomView, ServerMessage } from '../shared/protocol.ts'
+  import { PHASE_BANNER, describeCondition, describeParams, fmtClock, predictionSummary, scriptName, verbIcon, verbIconSrc } from './ui.ts'
+  import type { ClientMessage, LobbyPlayer, RoomView, ServerMessage } from '../shared/protocol.ts'
   import type { OracleReport } from '../shared/sim/oracle.ts'
   import type { DraftTier, ScriptSlot, SimPhase } from '../shared/sim/types.ts'
 
@@ -29,10 +31,23 @@
   let lastError = $state('')
   let reports = $state<Record<string, OracleReport>>({})
   let tickMs = $state(25000)
+  let autoAdv = $state(true) // room setting: DEFAULT ON — pickup games flow; the talk unchecks it
   let customJson = $state('')
   let order = $state('') // optional steer for the apprentice (advanced layer)
   let eventLog = $state<string[]>([])
   const feedCursor = newFeedCursor()
+
+  // teachability nudges (dismissible, non-blocking)
+  let armNudgeDismissed = $state(false)
+  let oracleCalloutDismissed = $state(false)
+
+  // wall-clock round countdown: anchored on the snapshot's nextTickInMs,
+  // interpolated locally between snapshots (500ms heartbeat)
+  let myIndex = $state(-1)
+  let lobbyList = $state<LobbyPlayer[]>([])
+  let snapAt = $state(0)
+  let clockNow = $state(0)
+  setInterval(() => (clockNow = performance.now()), 500)
 
   let ws: WebSocket | null = null
 
@@ -77,14 +92,20 @@
         joined = true
         isHost = msg.isHost
         room = msg.room
+        myIndex = msg.index
         workerToken = msg.workerToken
         hingeToken = msg.hingeToken
         void loadAgentPrompt() // eager, so the copy button works in one tap
       }
-      if (msg.type === 'lobby') started = msg.started
+      if (msg.type === 'lobby') {
+        started = msg.started
+        lobbyList = msg.players
+        snapAt = performance.now()
+      }
       if (msg.type === 'snapshot') {
         view = msg.view
         started = msg.view.started
+        snapAt = performance.now()
         const names = (i: number) => msg.view.players[i]?.name ?? `P${i}`
         for (const e of freshEvents(feedCursor, msg.view.events, msg.view.eventSeq)) {
           eventLog = [describeEvent(e, names), ...eventLog].slice(0, 30)
@@ -145,13 +166,72 @@
   const oracleAvailable = $derived(phase === 'round2')
   const canAct = $derived(phase !== 'reveal')
   const myDelta = $derived(view?.delta && me ? view.delta.players[me.index] : null)
+
+  // ── round-end + auto-advance surfacing (the "silent freeze" hotfix) ────────
+  const roundComplete = $derived(view !== null && (phase === 'round1' || phase === 'round2') && view.ticksRemaining === 0)
+  const autoIn = $derived(view?.autoAdvanceIn ?? null)
+  const bannerTitle = $derived(roundComplete ? `${phase === 'round1' ? 'ROUND 1' : 'ROUND 2'} COMPLETE` : banner.title)
+  const bannerSub = $derived(
+    roundComplete
+      ? autoIn !== null
+        ? `advancing in ${autoIn}…`
+        : view?.autoHeld
+          ? 'held — the host calls it'
+          : isHost
+            ? 'you call it — tap the button below'
+            : 'waiting for the host to call it'
+      : phase === 'intermission' && autoIn !== null
+        ? `round 2 in ${autoIn}s — ${isHost ? 'tap hold to keep talking' : 'the host can hold'}`
+        : banner.sub,
+  )
+  /** Wall-clock ms left in the running round, interpolated between snapshots. */
+  const roundClockMs = $derived.by(() => {
+    if (!view || (phase !== 'round1' && phase !== 'round2')) return null
+    const tr = view.ticksRemaining
+    if (tr === null || tr <= 0 || view.nextTickInMs === null) return null
+    const base = (tr - 1) * view.tickMs + view.nextTickInMs
+    return Math.max(0, base - (clockNow - snapAt))
+  })
+  /** "agent connected" liveness — in-game from the snapshot, lobby from the lobby list. */
+  const agentAgoMs = $derived.by(() => {
+    const raw = view?.players[myIndex]?.agentSeenAgoMs ?? lobbyList.find((p) => p.index === myIndex)?.agentSeenAgoMs ?? null
+    if (raw === null) return null
+    return raw + Math.max(0, clockNow - snapAt)
+  })
+  // drafts in the hand but nothing armed while the round runs — the classic miss
+  const armNudge = $derived(
+    !armNudgeDismissed &&
+      !roundComplete &&
+      (phase === 'round1' || phase === 'round2') &&
+      (me?.hand.some((sl) => sl.status === 'drafted') ?? false) &&
+      !(me?.hand.some((sl) => sl.armed) ?? false),
+  )
 </script>
+
+{#snippet howToPlay()}
+  <details class="howto">
+    <summary>📖 How to play (30 seconds)</summary>
+    <ol>
+      <li><b>You + your AI are ONE player.</b> It drafts scripts — only YOU can arm them.</li>
+      <li><b>Get scripts:</b> connect your agent (copy the prompt below), ask the apprentice, or write your own.</li>
+      <li><b>ARM a script</b> and it runs every tick: harvest matter → refine → SELL widgets = score.</li>
+      <li><b>Round 1: no oracle exists.</b> Arm and pray. <b>Round 2:</b> pay to VERIFY before arming — green scripts auto-renew every tick, while YOLO'd scripts draw extra gremlin damage.</li>
+      <li><b>Watch your ⚡</b> (regen each tick) and the gremlin — patch when pressure climbs.</li>
+    </ol>
+    <p class="faint">The bet: cheap drafts are fast, often wrong (~{APPRENTICE_FLAW_CHEAP_PCT}%); smart is pricier, usually right (~{APPRENTICE_FLAW_SMART_PCT}% flawed). Cheap+verify vs smart+trust — that's the round-2 lesson.</p>
+  </details>
+{/snippet}
 
 {#snippet connectAgent()}
   <!-- Two surfaces, cleanly split: this phone = the HINGE (arming lives here);
        the pasted prompt = the WORKER surface for the player's OWN agent. -->
   <div class="card stack">
     <h2 style="margin-top:0">🤖 Connect your agent</h2>
+    {#if agentAgoMs !== null}
+      <p class="ok" style="margin:0">🤖 agent connected · {Math.max(0, Math.round(agentAgoMs / 1000))}s ago</p>
+    {:else}
+      <p class="faint" style="margin:0">no agent yet — copy the prompt below</p>
+    {/if}
     <p class="muted">
       Your apprentice is YOUR agent — Claude Code, codex, copilot… Copy this
       prompt and paste it in: your agent drafts over HTTP, and the ARM buttons
@@ -184,14 +264,18 @@
     <button onclick={() => connect(true)} disabled={!name}>Create a room</button>
     <p class="faint">Big screen: open <span class="mono">#/board/PIN</span> on the projector.</p>
   </div>
+  {@render howToPlay()}
 {:else}
-  <div class="phase-banner phase-{phase}">
-    <span class="title">{banner.title}</span>
-    <span class="sub">{banner.sub}</span>
-    {#if view && (phase === 'round1' || phase === 'round2') && view.ticksRemaining !== null}
-      <span class="count num">{view.ticksRemaining}⏱</span>
+  <div class="phase-banner phase-{phase}{roundComplete ? ' complete' : ''}">
+    <span class="title">{bannerTitle}</span>
+    <span class="sub">{bannerSub}</span>
+    {#if roundClockMs !== null}
+      <span class="count num">{fmtClock(roundClockMs)} · {view?.ticksRemaining}⏱</span>
+    {:else if autoIn !== null}
+      <span class="count num">▶ {autoIn}s</span>
     {/if}
   </div>
+  {@render howToPlay()}
 
   {#if !started}
     <div class="card stack">
@@ -203,7 +287,12 @@
           <option value={5000}>quick tick — 5s</option>
           <option value={2000}>dev tick — 2s</option>
         </select>
-        <button class="primary" onclick={() => send({ type: 'start', token: hingeToken, tickMs })}>Start the game</button>
+        <label class="row" style="gap:var(--s-2); cursor:pointer">
+          <input type="checkbox" bind:checked={autoAdv} style="width:auto; min-height:0; margin:0" />
+          <span class="muted">auto-advance rounds when time runs out</span>
+        </label>
+        <button class="primary" onclick={() => send({ type: 'start', token: hingeToken, tickMs, autoAdvance: autoAdv })}>Start the game</button>
+        <p class="faint">Start when everyone's seated — players join at <b>{location.host}</b> · PIN <b class="mono">{room}</b></p>
         <p class="faint">Round lengths: 12 + 19 ticks (defaults).</p>
       {/if}
     </div>
@@ -221,7 +310,25 @@
     {#if lastError}<p class="err">✗ {lastError}</p>{/if}
 
     {#if isHost && phase !== 'reveal'}
-      <button class="ghost" style="width:100%" onclick={advancePhase}>{ADVANCE_LABEL[phase] ?? '▶'}</button>
+      {#if roundComplete || (phase === 'intermission' && autoIn !== null)}
+        <!-- the loud state: the round is over (or intermission is closing) — the
+             advance button is now THE thing on this phone -->
+        <div class="row">
+          <button class="primary advance-hot grow" onclick={advancePhase}>
+            {ADVANCE_LABEL[phase] ?? '▶'}{autoIn !== null ? ` — auto in ${autoIn}s` : ''}
+          </button>
+          {#if autoIn !== null}
+            <button class="ghost" onclick={() => send({ type: 'hold', token: hingeToken })}>⏸ Hold</button>
+          {/if}
+        </div>
+      {:else}
+        <button class="ghost" style="width:100%" onclick={advancePhase}>{ADVANCE_LABEL[phase] ?? '▶'}</button>
+      {/if}
+    {/if}
+    {#if !isHost && roundComplete}
+      <p class="muted" style="text-align:center">
+        ⏸ {autoIn !== null ? `next phase in ${autoIn}s — the host can hold` : view?.autoHeld ? 'held — the host will call it' : "round over — waiting for the host to call it"}
+      </p>
     {/if}
 
     {#if phase === 'reveal'}
@@ -251,15 +358,39 @@
       {/if}
 
       <h2>Your apprentice {#if view?.apprentice === 'practice'}<span class="faint">(practice mode — no model wired)</span>{/if}</h2>
+      <p class="faint" style="margin:var(--s-1) 0">Your apprentice drafts scripts into your hand — or connect your own agent below and it can write scripts directly.</p>
       <input placeholder="optional: tell it what you want (e.g. 'harvest fast')" bind:value={order} maxlength="200" autocomplete="off" />
-      <div class="row">
-        <button class="grow" onclick={() => askApprentice('cheap')} disabled={!canAct}>🤖 Ask for drafts — cheap ({DRAFT_COST_CHEAP}⚡)</button>
-        <button class="grow" onclick={() => askApprentice('smart')} disabled={!canAct}>🧠 smart ({DRAFT_COST_SMART}⚡)</button>
+      <div class="row" style="align-items:stretch">
+        <div class="grow stack" style="gap:2px">
+          <button onclick={() => askApprentice('cheap')} disabled={!canAct}>🤖 Ask for drafts — cheap ({DRAFT_COST_CHEAP}⚡)</button>
+          <span class="faint" style="text-align:center">fast, often wrong (~{APPRENTICE_FLAW_CHEAP_PCT}%)</span>
+        </div>
+        <div class="grow stack" style="gap:2px">
+          <button onclick={() => askApprentice('smart')} disabled={!canAct}>🧠 smart ({DRAFT_COST_SMART}⚡)</button>
+          <span class="faint" style="text-align:center">pricier, usually right (~{APPRENTICE_FLAW_SMART_PCT}% flawed)</span>
+        </div>
       </div>
 
       <h2>Your hand</h2>
+      <p class="faint" style="margin:var(--s-1) 0">
+        {oracleAvailable
+          ? `🔮 Oracle: ${ORACLE_COST}⚡ — checks for flaws + predicts 3 ticks of yield; green scripts auto-renew (and auto-disarm if corrupted)`
+          : '🔮 Oracle locked this round — no oracle exists yet. Arm and pray.'}
+      </p>
+      {#if oracleAvailable && !oracleCalloutDismissed}
+        <div class="hint">
+          <span>🔮 <b>The oracle is live.</b> Verify before you arm — verified scripts auto-renew.</span>
+          <button class="x" onclick={() => (oracleCalloutDismissed = true)}>✕</button>
+        </div>
+      {/if}
+      {#if armNudge}
+        <div class="hint">
+          <span>💡 Drafts do nothing until <b>ARMED</b> — tap ✅ ARM (or 🧨 YOLO) on a card.</span>
+          <button class="x" onclick={() => (armNudgeDismissed = true)}>✕</button>
+        </div>
+      {/if}
       {#if me && me.hand.length === 0 && me.pending.length === 0}
-        <div class="card"><p class="muted" style="margin:0">No scripts yet — ask your apprentice for a draft.</p></div>
+        <div class="card"><p class="muted" style="margin:0">No scripts yet — ask your apprentice above, connect your agent, or write one below.</p></div>
       {/if}
       {#each me?.pending ?? [] as pd (pd.reqId)}
         <div class="script-card pending-card">
@@ -291,6 +422,11 @@
           <div class="desc">
             {#each describeParams(card.script) as line, i (i)}<div>{line}</div>{/each}
             {#if describeCondition(card.script)}<div>⏳ {describeCondition(card.script)}</div>{/if}
+            {#if card.armed && card.lastRun}
+              <div class="lastrun {card.lastRun.ran && card.lastRun.note.length && !card.lastRun.note.includes('starved') && !card.lastRun.note.includes('nothing') ? 'live' : 'idle'}">
+                ▸ last tick: {card.lastRun.note}
+              </div>
+            {/if}
             <div class="faint mono">{card.script.verb} · {card.script.id}</div>
           </div>
           {#if card.lastVerdict && !card.lastVerdict.ok}

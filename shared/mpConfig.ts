@@ -17,6 +17,14 @@ export const ROUND2_TICKS_DEFAULT = 19
 export const ROUND_TICKS_MIN = 1
 export const ROUND_TICKS_MAX = 999
 
+/** Auto-advance (room setting `autoAdvance`, DEFAULT ON — pickup games flow;
+ * the talk turns it off). When a round's tick budget is spent the room issues
+ * the host `phase` command itself after a visible countdown; the intermission
+ * gets a fixed dwell first so the summary is readable. Reveal never advances.
+ * Server env AUTO_ADVANCE_MS / AUTO_DWELL_MS override (wstest runs fast). */
+export const AUTO_ADVANCE_MS = 8_000
+export const AUTO_DWELL_MS = 20_000
+
 /** PIN alphabet — no I/O, read-aloud friendly (chips' CODE_ALPHABET). */
 export const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
 export const CODE_LENGTH = 4

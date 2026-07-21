@@ -12,6 +12,8 @@
 import { randomBytes } from 'node:crypto'
 import { WebSocket } from 'ws'
 import {
+  AUTO_ADVANCE_MS,
+  AUTO_DWELL_MS,
   CODE_ALPHABET,
   CODE_LENGTH,
   MAX_PLAYERS,
@@ -29,7 +31,12 @@ import type { ClientMessage, LobbyPlayer, PlayerView, RoomLogView, RoomView, Ser
 import { apprenticeConfig, apprenticeMode, fetchDrafts } from './apprentice.ts'
 import { oracle } from '../shared/sim/oracle.ts'
 import { apply, computeDelta, newGame, RuleError, score, tick, ticksRemaining, ticksRunning } from '../shared/sim/sim.ts'
+import { PHASE_NEXT } from '../shared/sim/types.ts'
 import type { Command, DraftTier, Script, SimPhase, SimState } from '../shared/sim/types.ts'
+
+/** Auto-advance pacing — env-overridable so wstest runs the real path fast. */
+const AUTO_MS = Number(process.env.AUTO_ADVANCE_MS) || AUTO_ADVANCE_MS
+const DWELL_MS = Number(process.env.AUTO_DWELL_MS) || AUTO_DWELL_MS
 
 function send(ws: WebSocket, msg: ServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
@@ -42,6 +49,10 @@ interface Seat {
   name: string
   workerToken: string
   hingeToken: string
+  /** Last worker-token call on the HTTP surface (agents are HTTP by design;
+   * the phone's own ws traffic + its agent-prompt fetch don't count) — the
+   * "agent connected" liveness signal. Timestamp only, never token material. */
+  lastWorkerSeenAt: number | null
 }
 
 function mintToken(prefix: string): string {
@@ -71,6 +82,14 @@ export class Room {
    * curl-created dev-fast room needs no arguments at start. */
   presetRound1?: number
   presetRound2?: number
+  /** Auto-advance the weave when a round's budget is spent (DEFAULT ON —
+   * pickup games flow; the talk turns it off at create/start). */
+  autoAdvance = true
+  /** When the pending auto `phase` command fires (null = none pending). */
+  private autoAdvanceAt: number | null = null
+  /** Host tapped HOLD — suspend auto-advance until the host calls the phase. */
+  private autoHeld = false
+  private lastShownSec: number | null = null
   started = false
   sim: SimState | null = null
   lastTickAt = 0
@@ -117,12 +136,17 @@ export class Room {
       case 'join': return this.join(ws, msg.name, msg.key)
       case 'watch': return this.watch(ws)
       case 'start': {
-        const r = this.tryStart(msg.token, msg.tickMs, msg.round1Ticks, msg.round2Ticks)
+        const r = this.tryStart(msg.token, msg.tickMs, msg.round1Ticks, msg.round2Ticks, msg.autoAdvance)
         if (!r.ok) send(ws, { type: 'error', message: r.error })
         return
       }
       case 'phase': {
         const r = this.tryPhase(msg.token, msg.to)
+        if (!r.ok) send(ws, { type: 'error', message: r.error })
+        return
+      }
+      case 'hold': {
+        const r = this.tryHold(msg.token)
         if (!r.ok) send(ws, { type: 'error', message: r.error })
         return
       }
@@ -202,7 +226,7 @@ export class Room {
     if (this.started) return { ok: false, error: 'That game already started. Try another room code.', code: 409 }
     if (this.seats.length >= MAX_PLAYERS) return { ok: false, error: 'This room is full.', code: 409 }
     const index = this.seats.length
-    this.seats.push({ key, name, workerToken: mintToken('w'), hingeToken: mintToken('h') })
+    this.seats.push({ key, name, workerToken: mintToken('w'), hingeToken: mintToken('h'), lastWorkerSeenAt: null })
     return { ok: true, seat: index, rejoined: false }
   }
 
@@ -236,21 +260,23 @@ export class Room {
 
   /** Room settings preset at creation (the HTTP create body) — the same clamps
    * start applies, held as the start defaults so dev-fast rooms stay possible. */
-  configure(opts: { tickMs?: number; round1Ticks?: number; round2Ticks?: number }): void {
+  configure(opts: { tickMs?: number; round1Ticks?: number; round2Ticks?: number; autoAdvance?: boolean }): void {
     if (typeof opts.tickMs === 'number') this.tickMs = Math.max(TICK_MS_MIN, Math.min(TICK_MS_MAX, Math.floor(opts.tickMs)))
     if (typeof opts.round1Ticks === 'number') this.presetRound1 = clampRound(opts.round1Ticks, ROUND1_TICKS_DEFAULT)
     if (typeof opts.round2Ticks === 'number') this.presetRound2 = clampRound(opts.round2Ticks, ROUND2_TICKS_DEFAULT)
+    if (typeof opts.autoAdvance === 'boolean') this.autoAdvance = opts.autoAdvance
   }
 
   /** Start the game — a HOST act on the HUMAN surface (hinge token, seat 0).
    * Shared by ws start and HTTP start; the refusal carries the HTTP status. */
-  tryStart(token: string, tickMs?: number, round1Ticks?: number, round2Ticks?: number): { ok: true } | Refusal {
+  tryStart(token: string, tickMs?: number, round1Ticks?: number, round2Ticks?: number, autoAdvance?: boolean): { ok: true } | Refusal {
     const who = this.auth(token)
     if (!who) return { ok: false, error: 'missing or unknown token', code: 401 }
     if (who.seat !== 0) return { ok: false, error: 'Only the host can start the game.', code: 403 }
     if (who.role !== 'hinge') return { ok: false, error: 'Starting the game is a human act — use the hinge token.', code: 403 }
     if (this.started) return { ok: false, error: 'The game already started.', code: 409 }
     if (tickMs !== undefined) this.tickMs = Math.max(TICK_MS_MIN, Math.min(TICK_MS_MAX, Math.floor(tickMs)))
+    if (autoAdvance !== undefined) this.autoAdvance = autoAdvance
     this.sim = newGame(this.seed, this.seats.length, this.seats.map((s) => s.name), {
       round1: clampRound(round1Ticks ?? this.presetRound1, ROUND1_TICKS_DEFAULT),
       round2: clampRound(round2Ticks ?? this.presetRound2, ROUND2_TICKS_DEFAULT),
@@ -274,12 +300,36 @@ export class Room {
     return { ok: true }
   }
 
+  /** HOLD a pending auto-advance — the host's "wait, we're talking" tap.
+   * Suspends auto-advance until the host manually calls the phase (which
+   * clears the hold). Host-hinge, like phase itself. */
+  tryHold(token: string): { ok: true } | Refusal {
+    const who = this.auth(token)
+    if (!who) return { ok: false, error: 'missing or unknown token', code: 401 }
+    if (who.seat !== 0) return { ok: false, error: 'Only the host holds the round.', code: 403 }
+    if (who.role !== 'hinge') return { ok: false, error: 'Holding the round is a human act — use the hinge token.', code: 403 }
+    if (!this.started || !this.sim) return { ok: false, error: 'The game has not started yet.', code: 409 }
+    this.autoHeld = true
+    this.autoAdvanceAt = null
+    this.lastShownSec = null
+    this.pushSnapshots()
+    return { ok: true }
+  }
+
   /** Apply a seat-stamped command; log it on success. Shared by ws and HTTP. */
   command(cmd: Command): { ok: true } | { ok: false; error: string } {
     if (!this.sim) return { ok: false, error: 'The game has not started yet.' }
     try {
       apply(this.sim, cmd)
       this.log.push({ atTick: this.sim.tick, cmd })
+      if (cmd.t === 'phase') {
+        // ANY phase advance (host tap or auto) clears the pending countdown +
+        // hold and grants the fresh round a full tick interval
+        this.autoAdvanceAt = null
+        this.autoHeld = false
+        this.lastShownSec = null
+        this.lastTickAt = Date.now()
+      }
       this.pushSnapshots() // snapshots on change
       return { ok: true }
     } catch (e) {
@@ -386,7 +436,13 @@ export class Room {
   }
 
   private lobbyPlayers(): LobbyPlayer[] {
-    return this.seats.map((s, i) => ({ index: i, name: s.name, online: this.online(i) }))
+    const now = Date.now()
+    return this.seats.map((s, i) => ({
+      index: i,
+      name: s.name,
+      online: this.online(i),
+      agentSeenAgoMs: s.lastWorkerSeenAt === null ? null : now - s.lastWorkerSeenAt,
+    }))
   }
 
   broadcastLobby(): void {
@@ -403,11 +459,13 @@ export class Room {
    * your own seat sees script BODIES; auth tokens appear in no view ever. */
   viewFor(seatIndex: number | null): RoomView {
     const sim = this.sim
+    const now = Date.now()
     const players: PlayerView[] = sim
       ? sim.players.map((w, i) => ({
           index: i,
           name: w.name,
           online: this.online(i),
+          agentSeenAgoMs: this.seats[i]?.lastWorkerSeenAt == null ? null : now - this.seats[i].lastWorkerSeenAt!,
           score: score(w),
           tokens: w.tokens,
           matter: w.matter,
@@ -432,6 +490,12 @@ export class Room {
       tick: sim?.tick ?? 0,
       phase: sim?.phase ?? 'lobby',
       ticksRemaining: sim ? ticksRemaining(sim) : 0,
+      autoAdvance: this.autoAdvance,
+      autoAdvanceIn: this.countdownSec(now),
+      autoHeld: this.autoHeld,
+      // ms until the next world tick fires (null when the world holds still) —
+      // the client's wall-clock countdown anchors on this
+      nextTickInMs: this.started && sim && ticksRunning(sim) ? Math.max(0, this.lastTickAt + this.tickMs - now) : null,
       market: sim?.market ?? 0,
       gremlin: sim?.gremlin ?? 0,
       events: sim?.events ?? [],
@@ -489,11 +553,76 @@ export class Room {
   /** Advance the sim if this room's tick is due (called by the server loop). */
   maybeTick(now: number): void {
     if (!this.started || !this.sim) return
+    this.maybeAutoAdvance(now)
+    if (!this.sim) return // (belt+braces — auto-advance never clears it)
     if (!ticksRunning(this.sim)) return // frozen phase / spent budget — hold still
     if (now - this.lastTickAt < this.tickMs) return
     this.lastTickAt = now
     tick(this.sim)
     this.pushSnapshots()
+  }
+
+  /** The auto-advance driver (the D6 hotfix): when a round's budget is spent
+   * — the state that used to freeze SILENTLY — the room issues the same
+   * logged host `phase` command itself after a visible countdown, so pickup
+   * games flow without a host who knows the script. The intermission gets a
+   * fixed dwell first (the summary must be readable); the reveal never
+   * advances. Replay determinism is untouched: the sim only ever sees a
+   * `phase` command in the log, whoever issued it. */
+  private maybeAutoAdvance(now: number): void {
+    const s = this.sim!
+    if (!this.autoAdvance || this.autoHeld) return
+    const next = PHASE_NEXT[s.phase]
+    if (!next) return // reveal — the delta board tells the story, forever
+    let delay = AUTO_MS
+    if (s.phase === 'round1' || s.phase === 'round2') {
+      const budget = s.phaseTicks[s.phase]
+      if (budget <= 0 || s.tick < budget) {
+        this.autoAdvanceAt = null // budget not spent (or unlimited) — nothing pending
+        return
+      }
+    } else {
+      delay = DWELL_MS + AUTO_MS // intermission: dwell, then the countdown
+    }
+    if (this.autoAdvanceAt === null) {
+      this.autoAdvanceAt = now + delay
+      this.lastShownSec = null
+      this.pushSnapshots() // the "round complete" state lands immediately
+      return
+    }
+    if (now >= this.autoAdvanceAt) {
+      const r = this.command({ t: 'phase', to: next }) // logged like the host's tap
+      if (!r.ok) {
+        console.error(`[auto-advance] ${this.code}: phase→${next} refused (${r.error})`)
+        this.autoAdvanceAt = null
+      }
+      return
+    }
+    // push a snapshot when the displayed second changes (the countdown lives
+    // in the view; ticks are frozen so nothing else would push)
+    const sec = this.countdownSec(now)
+    if (sec !== this.lastShownSec) {
+      this.lastShownSec = sec
+      this.pushSnapshots()
+    }
+  }
+
+  /** Seconds until auto-advance, in the VISIBLE window only (the intermission
+   * dwell reads as null — the summary is the screen's job right then). */
+  private countdownSec(now: number): number | null {
+    if (this.autoAdvanceAt === null) return null
+    const remain = this.autoAdvanceAt - now
+    if (remain > AUTO_MS) return null
+    return Math.max(0, Math.ceil(remain / 1000))
+  }
+
+  /** An agent spoke on the HTTP worker surface — the dyad liveness signal. */
+  noteWorkerSeen(seat: number): void {
+    const s = this.seats[seat]
+    if (!s) return
+    s.lastWorkerSeenAt = Date.now()
+    if (!this.started) this.broadcastLobby() // phones see "agent connected" pre-start
+    else this.pushSnapshots() // in-game: the dyad indicator updates the moment the agent speaks
   }
 
   handleClose(ws: WebSocket): void {

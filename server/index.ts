@@ -7,6 +7,7 @@
 //   GET  /api/room/:pin/agent-prompt  — WORKER token: the ready-to-paste prompt
 //   POST /api/room/:pin/start         — HOST hinge: start the game
 //   POST /api/room/:pin/phase         — HOST hinge: advance the weave
+//   POST /api/room/:pin/hold          — HOST hinge: suspend a pending auto-advance
 //   GET  /api/room/:pin/state          — redacted per token (public without one)
 //   GET  /api/room/:pin/log            — command log + seed, redacted per token
 //   POST /api/room/:pin/draft         — WORKER token: submit a script directly
@@ -103,14 +104,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   // (dev-fast rooms stay possible from curl alone).
   if (url.pathname === '/api/room') {
     if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' })
-    let body: { name?: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number }
+    let body: { name?: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number; autoAdvance?: boolean }
     try {
       body = JSON.parse((await readBody(req)) || '{}')
     } catch {
       return sendJson(res, 400, { ok: false, error: 'invalid JSON body' })
     }
     const room = registry.create()
-    room.configure({ tickMs: body.tickMs, round1Ticks: body.round1Ticks, round2Ticks: body.round2Ticks })
+    room.configure({ tickMs: body.tickMs, round1Ticks: body.round1Ticks, round2Ticks: body.round2Ticks, autoAdvance: body.autoAdvance })
     const seated = room.seatJoin(typeof body.name === 'string' ? body.name : '', mintKey())
     if (!seated.ok) return sendJson(res, seated.code, { ok: false, error: seated.error }) // unreachable on a fresh room; belt+braces
     const seat = room.seats[seated.seat]
@@ -120,7 +121,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   }
 
   // /api/room/:pin/:action
-  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/(state|draft|draft-request|oracle|arm|disarm|scrap|log|join|start|phase|agent-prompt)$/)
+  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/(state|draft|draft-request|oracle|arm|disarm|scrap|log|join|start|phase|hold|agent-prompt)$/)
   if (!m) {
     sendJson(res, 404, { ok: false, error: 'unknown api route' })
     return
@@ -134,6 +135,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   const action = m[2]
   const token = bearerToken(req, url)
   const who = room.auth(token)
+  // "agent connected": any worker-token call on the HTTP surface marks the
+  // seat's agent live — EXCEPT agent-prompt, which is the PHONE fetching the
+  // copy text (it would false-positive every seat on join).
+  if (who && who.role === 'worker' && action !== 'agent-prompt') room.noteWorkerSeen(who.seat)
 
   if (action === 'join') {
     // join by PIN. Reconnect-by-key returns the SAME seat + tokens (agents
@@ -194,7 +199,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' })
   if (!who) return sendJson(res, 401, { ok: false, error: 'missing or unknown token' })
 
-  let body: { script?: Script; tier?: DraftTier; id?: string; order?: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number; to?: string }
+  let body: { script?: Script; tier?: DraftTier; id?: string; order?: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number; autoAdvance?: boolean; to?: string }
   try {
     body = JSON.parse((await readBody(req)) || '{}')
   } catch {
@@ -208,9 +213,17 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (action === 'start') {
     // starting is a HOST act on the HUMAN surface — tryStart carries the same
     // rules ws enforces and hands back the status for the refusal.
-    const r = room.tryStart(token, body.tickMs, body.round1Ticks, body.round2Ticks)
+    const r = room.tryStart(token, body.tickMs, body.round1Ticks, body.round2Ticks, body.autoAdvance)
     if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
     sendJson(res, 200, { ok: true, pin: room.code, tickMs: room.tickMs })
+    return
+  }
+
+  if (action === 'hold') {
+    // suspend a pending auto-advance — the same host-hinge act as phase (ws mirror)
+    const r = room.tryHold(token)
+    if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
+    sendJson(res, 200, { ok: true })
     return
   }
 

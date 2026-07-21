@@ -925,5 +925,72 @@ console.log('replay with async drafts')
   ok(w.tokens === expectedFromR2, `round-2 tokens are pure regen after the paid/refunded wash (${w.tokens})`)
 }
 
+// ── 23. Per-script yield legibility: lastRun tells the truth per slot ────────
+// The hotfix for "multiples of a thing don't seem to work": a STARVED script
+// (shared-resource saturation) must be distinguishable from a dead one — for
+// the phone card AND the agent reading its own /state.
+console.log('per-script lastRun yield')
+{
+  // harvest reports its gain
+  const s = newGameR2(9)
+  apply(s, { t: 'draftAccepted', script: H(3), tier: 'cheap' })
+  apply(s, { t: 'oracleCheck', id: 'h1' })
+  apply(s, { t: 'arm', id: 'h1' })
+  tick(s)
+  const hr = s.players[0].scripts[0].lastRun
+  ok(hr !== null && hr.ran && hr.dMatter === 3 && hr.note === '+3 matter', `harvest lastRun carries the yield (${hr?.note})`)
+
+  // TWO refiners on thin matter: the first eats, the second STARVES — and says so
+  const s2 = newGameR2(9)
+  s2.players[0].matter = 3 // exactly one widget's worth
+  for (const id of ['r1', 'r2']) {
+    apply(s2, { t: 'draftAccepted', script: { id, verb: 'refine', params: { rate: 1 } }, tier: 'cheap' })
+    apply(s2, { t: 'oracleCheck', id })
+    apply(s2, { t: 'arm', id })
+  }
+  tick(s2)
+  const [ra, rb] = s2.players[0].scripts.map((sl) => sl.lastRun)
+  ok(ra !== null && ra.ran && ra.dWidgets === 1, 'slot-order: the first refiner gets the matter')
+  ok(rb !== null && rb.ran && rb.dWidgets === 0 && rb.note.includes('starved'), `the starved duplicate SAYS it starved (${rb?.note})`)
+
+  // a gated script reports idle, not starving
+  const s3 = newGameR2(13)
+  apply(s3, { t: 'draftAccepted', script: { id: 'g1', verb: 'harvest', params: { rate: 2 }, when: { field: 'tick', op: '>', value: 4 } }, tier: 'cheap' })
+  apply(s3, { t: 'oracleCheck', id: 'g1' })
+  apply(s3, { t: 'arm', id: 'g1' })
+  tick(s3)
+  const gr = s3.players[0].scripts[0].lastRun
+  ok(gr !== null && !gr.ran && gr.note.includes('idle'), `condition-false reads as idle (${gr?.note})`)
+
+  // an empty-handed seller reports nothing-to-sell
+  const s4 = newGameR2(9)
+  apply(s4, { t: 'draftAccepted', script: { id: 'sl', verb: 'sell', params: { amount: 2 } }, tier: 'cheap' })
+  apply(s4, { t: 'oracleCheck', id: 'sl' })
+  apply(s4, { t: 'arm', id: 'sl' })
+  tick(s4)
+  const sr = s4.players[0].scripts[0].lastRun
+  ok(sr !== null && sr.ran && sr.dWidgets === 0 && sr.note === 'nothing to sell', `sell with no inventory says so (${sr?.note})`)
+
+  // a real sale reports the token gain
+  s4.players[0].widgets = 5
+  tick(s4)
+  const sr2 = s4.players[0].scripts[0].lastRun
+  ok(sr2 !== null && sr2.dWidgets === -2 && sr2.dTokens > 0 && sr2.note.startsWith('sold 2'), `sell reports units + tokens (${sr2?.note})`)
+
+  // determinism: lastRun is pure f(seed+log) — same run twice, identical snap
+  const mk = () => {
+    const x = newGameR2(77)
+    x.players[0].matter = 3
+    for (const id of ['r1', 'r2']) {
+      apply(x, { t: 'draftAccepted', script: { id, verb: 'refine', params: { rate: 1 } }, tier: 'cheap' })
+      apply(x, { t: 'oracleCheck', id })
+      apply(x, { t: 'arm', id })
+    }
+    for (let i = 0; i < 5; i++) tick(x)
+    return x
+  }
+  ok(snap(mk()) === snap(mk()), 'lastRun rides the snapshot deterministically (replay identity holds)')
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

@@ -42,5 +42,13 @@ Your moves (the world ticks every ~${secs}s — poll state about that often; eco
   curl -s -X POST ${url}/scrap ${auth} ${json} -d '{"id":"a1"}'         free a dead/unwanted hand slot
   curl -s -X POST ${url}/draft-request ${auth} ${json} -d '{"tier":"cheap"}'   optional: ask the house generator instead of writing your own
 
-Read state.you.hand for your scripts (bodies + verdicts) and state.players for the public board. Score = widgets SOLD + uptime - waste, so build the chain: harvest -> refine -> sell. Errors come back as {"ok":false,"error":"the reason, spoken plainly"} — read them, they tell you the rule. When you like a script, tell your human WHICH id to arm and WHY; the ARM button is on their phone, not in your API.`
+Read state.you.hand for your scripts (bodies + verdicts) and state.players for the public board. Score = widgets SOLD + uptime - waste, so build the chain: harvest -> refine -> sell. Errors come back as {"ok":false,"error":"the reason, spoken plainly"} — read them, they tell you the rule. When you like a script, tell your human WHICH id to arm and WHY; the ARM button is on their phone, not in your API.
+
+KEEP PLAYING — you are a live teammate, not a one-shot drafter. Poll state on a polite loop (every 5-10s is right; never faster than 3s) and react to what CHANGED:
+  - state.phase flipped: intermission = world frozen, stock the hand for round 2. round2 = the oracle is LIVE — verify your drafts (POST oracle) BEFORE recommending an arm; a verified script auto-renews.
+  - an oracle verdict landed on one of your scripts (hand[].lastVerdict): green = tell your human it's safe to arm; red = read the reasons, scrap or redraft.
+  - hand[].lastRun shows what each ARMED script actually did last tick ("+3 matter" / "starved — needs 3 matter per widget" / "idle — condition false"): a starving refiner means the chain is out of balance — fix upstream (more harvest) before drafting more of the same.
+  - market moved (state.market = tokens per widget): sell into spikes. gremlin climbing (state.gremlin): a patch script earns its keep.
+  - a hand slot freed (dead/scrapped): draft again — your human should always have options.
+  - state.phase == "reveal": STOP playing. Summarize in one message how your dyad did (score, disasters, what the oracle caught) and say goodnight.`
 }
