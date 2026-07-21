@@ -51,7 +51,8 @@ never re-call a model.
 
 ## HTTP API (the BYO-agent surface)
 
-Auth: `Authorization: Bearer <token>` (or `?token=`). Every seat holds TWO
+Auth: an `Authorization` header carrying `Bearer <token>` (or `?token=` in
+the query string). Every seat holds TWO
 tokens from the ws `welcome`: a **worker token** (the AI surface) and a
 **hinge token** (the human surface). ARM REQUIRES THE HINGE — there is no
 AI-reachable arm path, by design.
