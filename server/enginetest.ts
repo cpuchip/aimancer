@@ -132,9 +132,12 @@ async function main(): Promise<void> {
     try {
       // the engine package doc's own hostile case: big-int arithmetic burns
       // wall-clock CPU inside single ops without burning gas — the exact hole
-      // this Node-side wall exists to cover
+      // this Node-side wall exists to cover. memLimitBytes is widened so the
+      // engine's OWN allocation watchdog can't win the race and answer with a
+      // fast error value — this test pins the WALL-CLOCK path specifically
+      // (the watchdog path is the engine repo's to test).
       const hostile = 'x = 10\nfor i in range(26):\n    x = x * x\nact("farm", rate=1)\n'
-      await host.run({ script: hostile, world: world(), seed: 1, tick: 0, gasLimit: 50_000, memory: {} }, 250)
+      await host.run({ script: hostile, world: world(), seed: 1, tick: 0, gasLimit: 50_000, memory: {}, memLimitBytes: 4 * 1024 * 1024 * 1024 }, 250)
     } catch (e) {
       timedOut = e instanceof Error && e.message.includes('timeout')
     }

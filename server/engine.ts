@@ -31,6 +31,10 @@ export interface EngineRequest {
   tick: number
   gasLimit: number
   memory: Record<string, unknown>
+  /** Per-run allocation budget for the engine's watchdog (bytes; engine
+   * default when omitted). enginetest widens it to isolate the wall-clock
+   * timeout path from the watchdog. */
+  memLimitBytes?: number
 }
 
 export interface EngineResponse {
