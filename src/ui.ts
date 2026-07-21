@@ -35,6 +35,21 @@ export function verbIcon(verb: string): string {
   return VERB_ICON[verb] ?? '❓'
 }
 
+/** Generated art for the five REAL verbs (brass/indigo set, /assets). A
+ * hallucinated verb gets null → the emoji fallback renders it as written
+ * (display-honesty rule): no icon is itself a tell worth reading. */
+export const VERB_ICON_SRC: Record<string, string> = {
+  harvest: '/assets/verb_harvest.png',
+  refine: '/assets/verb_refine.png',
+  sell: '/assets/verb_sell.png',
+  patch: '/assets/verb_patch.png',
+  boost: '/assets/verb_boost.png',
+}
+
+export function verbIconSrc(verb: string): string | null {
+  return VERB_ICON_SRC[verb] ?? null
+}
+
 /** Params in plain words, one line each. Unknown params render raw — the
  * apprentice wrote them; reading them is your job (or the oracle's). */
 export function describeParams(script: Script): string[] {

@@ -67,6 +67,11 @@
 </script>
 
 <div class="board">
+  <div class="board-head">
+    <img class="board-emblem" src="/assets/emblem.png" alt="" />
+    <span class="wordmark">AIMANCER</span>
+    <span class="muted board-tag">your apprentice drafts · only a human arms</span>
+  </div>
   <div class="phase-banner phase-{phase}">
     <span class="title">{banner.title}</span>
     <span class="sub">{banner.sub}</span>
@@ -80,7 +85,7 @@
     {#if view && view.started}
       <span class="row" style="gap:var(--s-4)">
         <span class="trend {marketTrend === 'up' ? 'up' : marketTrend === 'down' ? 'down' : ''}">📈 market {view.market}/widget {trendGlyph(marketTrend)}</span>
-        <span class="trend {gremlinTrend === 'up' ? 'down' : ''}">👹 gremlin {view.gremlin}/10 {trendGlyph(gremlinTrend)}</span>
+        <span class="trend {gremlinTrend === 'up' ? 'down' : ''}"><img class="ticon" src="/assets/gremlin_a.png" alt="gremlin" /> gremlin {view.gremlin}/10 {trendGlyph(gremlinTrend)}</span>
         <span class="muted num">tick {view.tick} · {view.tickMs / 1000}s</span>
       </span>
     {:else}
@@ -89,7 +94,8 @@
   </div>
 
   {#if !view || !view.started}
-    <div class="card" style="text-align:center; padding:var(--s-7)">
+    <div class="card lobby-hero" style="text-align:center; padding:var(--s-7)">
+      <img class="lobby-emblem" src="/assets/emblem.png" alt="" />
       <div style="font-size:var(--t-3xl); font-weight:700; letter-spacing:0.3em">{pin}</div>
       <p class="muted" style="font-size:var(--t-lg)">grab your phone · {location.host} · enter the PIN</p>
       {#if lobbyPlayers.length}
@@ -102,6 +108,7 @@
     </div>
   {:else if phase === 'reveal' && view.delta}
     <div class="delta-total">
+      <img class="reveal-eye" src="/assets/oracle_eye.png" alt="" />
       THE ROOM: {view.delta.totals.r1Score} → {view.delta.totals.r2Score}
       <span class={view.delta.totals.score >= 0 ? 'delta-pos' : 'delta-neg'}>
         {view.delta.totals.score >= 0 ? '+' : ''}{view.delta.totals.score}
@@ -199,7 +206,10 @@
         <h2>Disaster theater</h2>
         <div class="events">
           {#each theater as item (item.key)}
-            <div class={item.big ? 'theater-big' : ''}>{item.line}</div>
+            <div class={item.big ? 'theater-big' : ''}>
+              {#if item.big}<img class="ticon" src="/assets/gremlin_b.png" alt="" />{/if}
+              {item.line}
+            </div>
           {/each}
           {#if theater.length === 0}<div class="muted">quiet… for now</div>{/if}
         </div>

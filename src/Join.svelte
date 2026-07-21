@@ -12,7 +12,7 @@
     TOKEN_REGEN,
   } from '../shared/sim/balance.ts'
   import { describeEvent, freshEvents, newFeedCursor } from '../shared/eventFeed.ts'
-  import { PHASE_BANNER, describeCondition, describeParams, predictionSummary, scriptName, verbIcon } from './ui.ts'
+  import { PHASE_BANNER, describeCondition, describeParams, predictionSummary, scriptName, verbIcon, verbIconSrc } from './ui.ts'
   import type { ClientMessage, RoomView, ServerMessage } from '../shared/protocol.ts'
   import type { OracleReport } from '../shared/sim/oracle.ts'
   import type { DraftTier, ScriptSlot, SimPhase } from '../shared/sim/types.ts'
@@ -172,8 +172,11 @@
 {/snippet}
 
 {#if !joined}
-  <h1>AIMANCER</h1>
-  <p class="muted">Your AI apprentice drafts the scripts. Only YOU can arm them.</p>
+  <div class="hero">
+    <img class="hero-emblem" src="/assets/emblem.png" alt="" />
+    <h1 class="wordmark">AIMANCER</h1>
+    <p class="muted">Your AI apprentice drafts the scripts. Only YOU can arm them.</p>
+  </div>
   <div class="card stack">
     <input placeholder="your name" bind:value={name} maxlength="16" autocomplete="off" />
     <input placeholder="room PIN (4 letters)" bind:value={pin} maxlength="4" style="text-transform:uppercase" autocomplete="off" />
@@ -208,9 +211,9 @@
   {:else}
     {#if myShop}
       <div class="stats">
-        <span class="stat">⚡ <b class="num">{myShop.tokens}</b> +{TOKEN_REGEN}/tick</span>
-        <span class="stat">⛏ <b class="num">{myShop.matter}</b></span>
-        <span class="stat">⚙ <b class="num">{myShop.widgets}</b></span>
+        <span class="stat"><img class="ricon" src="/assets/res_tokens.png" alt="tokens" /> <b class="num">{myShop.tokens}</b> +{TOKEN_REGEN}/tick</span>
+        <span class="stat"><img class="ricon" src="/assets/res_matter.png" alt="matter" /> <b class="num">{myShop.matter}</b></span>
+        <span class="stat"><img class="ricon" src="/assets/res_widgets.png" alt="widgets" /> <b class="num">{myShop.widgets}</b></span>
         <span class="stat">★ <b class="num">{myShop.score}</b></span>
       </div>
     {/if}
@@ -274,7 +277,11 @@
         {@const gone = card.status === 'dead' || card.status === 'blown'}
         <div class="script-card {gone ? 'gone' : card.armed ? (card.yolo ? 'armed-yolo' : 'armed-ok') : ''}">
           <div class="row">
-            <span>{verbIcon(card.script.verb)}</span>
+            {#if verbIconSrc(card.script.verb)}
+              <img class="vicon" src={verbIconSrc(card.script.verb)} alt={card.script.verb} />
+            {:else}
+              <span class="vicon-fallback">{verbIcon(card.script.verb)}</span>
+            {/if}
             <span class="name">{scriptName(card.script)}</span>
             <span class="chip {chip.cls}">{chip.label}</span>
             {#if card.lastVerdict}
@@ -287,9 +294,10 @@
             <div class="faint mono">{card.script.verb} · {card.script.id}</div>
           </div>
           {#if card.lastVerdict && !card.lastVerdict.ok}
-            <div class="verdict red">{card.lastVerdict.reasons.join(' · ')}</div>
+            <div class="verdict red"><img class="vbadge" src="/assets/oracle_eye.png" alt="oracle verdict" /> {card.lastVerdict.reasons.join(' · ')}</div>
           {:else if report && report.ok}
             <div class="verdict green">
+              <img class="vbadge" src="/assets/oracle_eye.png" alt="oracle verdict" />
               {predictionSummary(report)}
               {#if report.reasons.length}<div class="faint">{report.reasons.join(' · ')}</div>{/if}
             </div>
@@ -298,7 +306,7 @@
             <div class="actions">
               <button class="oracle" disabled={!oracleAvailable} title={oracleAvailable ? '' : "the oracle hasn't been invented yet"}
                 onclick={() => send({ type: 'oracle', token: hingeToken, id: card.script.id })}>
-                🔮 Oracle {oracleAvailable ? `${ORACLE_COST}⚡` : '(round 2)'}
+                <img class="bicon" src="/assets/oracle_eye.png" alt="" /> Oracle {oracleAvailable ? `${ORACLE_COST}⚡` : '(round 2)'}
               </button>
               {#if card.armed}
                 <button onclick={() => send({ type: 'disarm', token: hingeToken, id: card.script.id })}>⏸ Disarm</button>
