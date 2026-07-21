@@ -34,9 +34,13 @@ The build week (from the design doc, D1 = 2026-07-21):
       asks an agent to bypass its own permission prompts) + phone "Connect
       your agent" panel (copy button; hinge stays on the phone) + `disarm`
       TIGHTENED to hinge-only (ws + HTTP — script-lifecycle control) +
-      `cpuchip/aimancer-go` client kit (package + `aimancer-play` bot CLI) +
-      `scripts/loom-bots.ps1` (loom-driven copilot/codex seat-filler bots).
-      Gates: smoke 196 · wstest 149.
+      `cpuchip/aimancer-go` client kit (package + `aimancer-play` bot CLI;
+      full fast game LIVE-PROVEN vs a local server) + `scripts/loom-bots.ps1`
+      seat-filler bots — **LIVE CAPSTONE PROOF (room SLZM, local :18090):
+      REAL copilot (1.0.73, THROUGH loom + the argv-shim) and REAL codex
+      (0.144.6, native sandbox) each HTTP-joined a seat, curled the API
+      unaided, and landed 2 drafts on the wire (log: seat 2 tick 2, seat 1
+      tick 7).** Gates: smoke 196 · wstest 149.
 - [ ] **D5** — presentation weave (round switcher, delta board, replay
       theater) + assets + polish.
 - [ ] **D6** — family+Dave playtest → fix → dress rehearsal.
@@ -64,6 +68,22 @@ The build week (from the design doc, D1 = 2026-07-21):
 - The agent-prompt embeds the room's CURRENT tickMs at fetch time; if the
   host later starts with a different tick, the pacing hint is stale (cosmetic
   — state carries the truth). D5 could re-fetch after start if it matters.
+- **BYO-agent field notes (from the live capstone, all verified on this box;
+  demo-day relevance = players' agents will hit the same walls):**
+  - copilot on Windows: the npm `.cmd` shim MANGLES quote-heavy prompts when
+    exec'd (loom hits this) — `scripts/copilot-shim/` is the fix (pin via
+    `LOOM_COPILOT_BIN`). URL permissions are a separate class from tool
+    permissions, headless prompts fail closed, a user's
+    `~/.copilot/settings.json` `allowedUrls` allowlist silently blocks the
+    room, and `--allow-url` only matches WITH the scheme. A human PASTING the
+    prompt interactively just gets asked — that flow is untouched.
+  - codex on Windows: the experimental sandbox declines shell commands under
+    `workspace-write` even with `network_access=true` — the working encoding
+    is `-s danger-full-access` (macOS/Linux keep the researched
+    workspace-write + network override).
+  - loom (for its own roadmap, not ours): no passthrough for codex `-c`
+    overrides or copilot `--allow-url` — the two scoped-permission encodings
+    a game bot wants; plus the Windows .cmd resolution above.
 
 ## D3 rulings + notes (for the D4 brief)
 

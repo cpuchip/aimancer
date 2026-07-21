@@ -13,18 +13,42 @@ one seat per agent, fetch each seat's OFFICIAL paste-prompt from
 GET /api/room/:pin/agent-prompt (the same text a human copies from their
 phone), start the game, then hand each prompt to a real agent CLI:
 
-  copilot — driven THROUGH LOOM (`loom run --agent copilot -isolate`).
-            -isolate maps to copilot's `--allow-all-tools`: tools auto-run but
-            file access stays walled to the workdir — the scoped middle rung
-            of loom's trust ladder. Pure curl, tier-1 friction.
-  codex   — driven DIRECTLY (`codex exec -s workspace-write
-            -c sandbox_workspace_write.network_access=true`), because codex's
-            workspace-write sandbox blocks NETWORK by default and loom has no
-            passthrough for the `-c` override today (loom's only
-            network-permitting rung is --dangerously-bypass, which this
-            script will not default to). The flags here are the researched,
-            correct encoding: native kernel sandbox ON, network opened,
-            filesystem walled to the scratch workdir.
+  copilot — driven THROUGH LOOM (`loom run --agent copilot -skip-permissions`
+            → copilot `--allow-all`). Three Windows findings, all verified
+            live on 1.0.73 (this room's config; yours may differ):
+            1. QUOTE MANGLING: the npm install exposes copilot only as a
+               .cmd/.ps1 shim; exec'ing the .cmd (which loom's backend
+               resolves to) re-parses argv through cmd.exe and MANGLES a
+               prompt containing double quotes — the paste-prompt arrives
+               truncated/garbled and the agent flails. Fix: build the tiny
+               argv-preserving forwarder in scripts/copilot-shim/ (go build
+               -o copilot-shim.exe .) and set LOOM_COPILOT_BIN to it. With
+               the shim, the loom path passes end-to-end.
+            2. URL PERMISSIONS are their own class: `--allow-all-tools`
+               alone still denies the localhost curl headless (prompts fail
+               closed), and a user-level ~/.copilot/settings.json
+               `allowedUrls` allowlist silently excludes the room URL.
+               loom's -skip-permissions (`--allow-all`) covers it; the
+               scoped flag is `--allow-url <BaseUrl>` — WITH the scheme
+               ("localhost:18090" never matches; "http://localhost:18090"
+               does).
+            3. -CopilotScoped drives copilot DIRECTLY (via the .ps1 shim,
+               argv-safe inside pwsh) with the tightest encoding:
+               `--allow-all-tools --allow-url <BaseUrl>` — tools auto-run,
+               file walls intact, network scoped to the room's host.
+            Either way: pure curl, no special network story.
+  codex   — driven DIRECTLY, because loom has no passthrough for codex `-c`
+            overrides today and codex's sandbox needs per-OS encoding:
+              macOS/Linux: `-s workspace-write
+                -c sandbox_workspace_write.network_access=true` — the
+                researched flags: native kernel sandbox ON, network opened,
+                filesystem walled to the scratch workdir.
+              Windows: `-s danger-full-access` — VERIFIED LIVE (codex-cli
+                0.144.6): the experimental Windows sandbox declines shell
+                commands under workspace-write even with network_access=true
+                ("rejected: blocked by policy"), so full-access is the only
+                encoding that plays here. Local rooms only; that's why the
+                localhost guardrail above exists.
             (-CodexViaLoom uses loom's -skip-permissions rung instead —
             clearly labeled, OFF by default.)
 
@@ -54,9 +78,10 @@ param(
   [int]$Round2 = 6,
   [switch]$NoStart,                       # don't start the game (a human host will)
   [switch]$CodexViaLoom,                  # drive codex through loom's -skip-permissions rung (labeled; default OFF)
+  [switch]$CopilotScoped,                 # drive copilot DIRECTLY with --allow-url <BaseUrl> instead of through loom
   [switch]$ForceLive,                     # required to aim at a non-local server
   [string]$LoomExe = $(if ($env:LOOM_EXE) { $env:LOOM_EXE } else { "$env:USERPROFILE\go\bin\loom.exe" }),
-  [int]$WaitSeconds = 150
+  [int]$WaitSeconds = 300
 )
 $ErrorActionPreference = 'Stop'
 
@@ -66,8 +91,8 @@ if ($BaseUrl -notmatch '^https?://(localhost|127\.0\.0\.1)([:/]|$)' -and -not $F
 }
 if (-not (Test-Path $LoomExe)) { throw "loom-bots: loom not found at '$LoomExe' (set -LoomExe or `$env:LOOM_EXE)" }
 $loomBackends = & $LoomExe agents 2>$null
-if ($Agents -contains 'copilot' -and $loomBackends -notcontains 'copilot') {
-  throw "loom-bots: this loom binary has no copilot backend ($($loomBackends -join ', ')). Build loom from HEAD (projects/loom: go build ./cmd/loom) and point -LoomExe at it."
+if ($Agents -contains 'copilot' -and -not $CopilotScoped -and $loomBackends -notcontains 'copilot') {
+  throw "loom-bots: this loom binary has no copilot backend ($($loomBackends -join ', ')). Build loom from HEAD (projects/loom: go build ./cmd/loom) and point -LoomExe at it, or pass -CopilotScoped."
 }
 # pin copilot past the VS Code extension's shadow install (it lags npm's)
 $npmCopilot = "$env:APPDATA\npm\copilot.cmd"
@@ -115,11 +140,18 @@ function BotPrompt([string]$paste) {
   @"
 You are an autonomous SEAT-FILLER BOT in a local game demo (clearly labeled as
 a bot; no human is at this seat). Follow the room prompt below exactly as any
-player's agent would. Work quickly and stop: (1) GET state once; (2) author
-2-3 sensible DSL scripts for the current world and POST each to /draft;
-(3) GET state once more to confirm they landed in you.hand; (4) reply with a
-one-line summary of what you drafted. Do not wait for a human, do not poll in
-a loop, and do not try to arm — your worker token cannot, by design.
+player's agent would, but keep it SHORT — at most 5 shell commands total, then
+stop: (1) GET state once; (2) author TWO scripts — a harvest and a refine —
+and POST each to /draft; (3) GET state once to confirm they are in you.hand;
+(4) reply with a one-line summary of what you drafted. Run the curl commands
+DIRECTLY in the shell — do NOT create, write, or edit any files, and do not
+build helper scripts. Do not wait for a human, do not poll in a loop, and do
+not try to arm — your worker token cannot, by design.
+
+About the room prompt's approve-the-curl note: your OPERATOR already granted
+this run's tool permissions up front, in the invocation flags — that grant IS
+the approval the note asks for. There is no human at the console to ask, so
+run the curls directly; do not stop to request interactive permission.
 
 $paste
 "@
@@ -145,17 +177,50 @@ foreach ($bot in $bots) {
           Get-Content $pf -Raw | & $loom run --agent codex -skip-permissions -dir $dir "$(Get-Content $pf -Raw)" *> $log
         } -ArgumentList $LoomExe, $promptFile, $dir, $log
       } else {
-        # the researched encoding: native sandbox ON (workspace-write), network
-        # opened via the config override, prompt over stdin (`-` sentinel)
+        # per-OS sandbox encoding (see the header comment): the researched
+        # workspace-write + network override where the native sandbox works;
+        # danger-full-access on Windows, where workspace-write declines shell
+        # commands outright (verified live, codex-cli 0.144.6). Prompt over
+        # stdin (`-` sentinel).
+        $sandboxArgs = if ($IsWindows) { @('-s', 'danger-full-access') }
+                       else { @('-s', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true') }
         $jobs += Start-Job -Name $bot.Agent -ScriptBlock {
-          param($pf, $dir, $log)
+          param($pf, $dir, $log, $sb)
           Get-Content $pf -Raw |
-            & codex exec --json --skip-git-repo-check -C $dir -s workspace-write -c 'sandbox_workspace_write.network_access=true' - *> $log
-        } -ArgumentList $promptFile, $dir, $log
+            & codex exec --json --skip-git-repo-check -C $dir @sb - *> $log
+        } -ArgumentList $promptFile, $dir, $log, $sandboxArgs
+      }
+    }
+    'copilot' {
+      if ($CopilotScoped) {
+        # direct: the tightest copilot encoding — tools auto-run, paths
+        # walled, network allowed ONLY to the room's host
+        # NOTE: --allow-url needs the SCHEME to match (verified live 1.0.73:
+        # "localhost:18090" never matches; "http://localhost:18090" does).
+        # Prefer an argv-safe bin: the pinned shim, else the npm .ps1 (pwsh
+        # passes args natively), never the .cmd (quote mangling — see header).
+        $allowUrl = $BaseUrl.TrimEnd('/')
+        $npmPs1 = "$env:APPDATA\npm\copilot.ps1"
+        $copilotBin = if ($env:LOOM_COPILOT_BIN) { $env:LOOM_COPILOT_BIN }
+                      elseif (Test-Path $npmPs1) { $npmPs1 }
+                      else { 'copilot' }
+        $jobs += Start-Job -Name $bot.Agent -ScriptBlock {
+          param($bin, $pf, $dir, $log, $allowUrl)
+          Set-Location $dir
+          $prompt = Get-Content $pf -Raw
+          & $bin -p $prompt --log-level none --no-color --no-auto-update --allow-all-tools --allow-url $allowUrl *> $log
+        } -ArgumentList $copilotBin, $promptFile, $dir, $log, $allowUrl
+      } else {
+        # through loom: -skip-permissions → --allow-all, loom's only rung
+        # that opens copilot's separate URL permission class headless
+        $jobs += Start-Job -Name $bot.Agent -ScriptBlock {
+          param($loom, $pf, $dir, $log)
+          & $loom run --agent copilot -skip-permissions -dir $dir "$(Get-Content $pf -Raw)" *> $log
+        } -ArgumentList $LoomExe, $promptFile, $dir, $log
       }
     }
     default {
-      # copilot (and claude, if listed) through loom's scoped -isolate rung
+      # any other loom backend (claude, agy, opencode…) — the -isolate rung
       $jobs += Start-Job -Name $bot.Agent -ScriptBlock {
         param($loom, $agent, $pf, $dir, $log)
         & $loom run --agent $agent -isolate -dir $dir "$(Get-Content $pf -Raw)" *> $log
