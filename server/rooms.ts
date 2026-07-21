@@ -29,7 +29,7 @@ import type { ClientMessage, LobbyPlayer, PlayerView, RoomLogView, RoomView, Ser
 import { apprenticeConfig, apprenticeMode, fetchDrafts } from './apprentice.ts'
 import { oracle } from '../shared/sim/oracle.ts'
 import { apply, computeDelta, newGame, RuleError, score, tick, ticksRemaining, ticksRunning } from '../shared/sim/sim.ts'
-import type { Command, DraftTier, Script, SimState } from '../shared/sim/types.ts'
+import type { Command, DraftTier, Script, SimPhase, SimState } from '../shared/sim/types.ts'
 
 function send(ws: WebSocket, msg: ServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
@@ -48,10 +48,29 @@ function mintToken(prefix: string): string {
   return `${prefix}_${randomBytes(12).toString('base64url')}`
 }
 
+/** Mint a reconnect key for an HTTP joiner who didn't bring one (the phone
+ * uses localStorage; an agent gets its key in the join response instead). */
+export function mintKey(): string {
+  return `k_${randomBytes(9).toString('base64url')}`
+}
+
+function clampRound(v: number | undefined, dflt: number): number {
+  return v === undefined ? dflt : Math.max(ROUND_TICKS_MIN, Math.min(ROUND_TICKS_MAX, Math.floor(v)))
+}
+
+/** A lifecycle refusal, HTTP-shaped: the code is the status the API mirror
+ * sends (401 unknown token · 403 wrong seat/surface · 409 room state said no);
+ * the ws layer sends just the spoken error. */
+export type Refusal = { ok: false; error: string; code: 401 | 403 | 409 }
+
 export class Room {
   readonly code: string
   readonly seed: number
   tickMs = TICK_MS_DEFAULT
+  /** Round budgets preset at HTTP create time — used as the start defaults so a
+   * curl-created dev-fast room needs no arguments at start. */
+  presetRound1?: number
+  presetRound2?: number
   started = false
   sim: SimState | null = null
   lastTickAt = 0
@@ -75,6 +94,13 @@ export class Room {
     return this.emptyAt === null ? 0 : now - this.emptyAt
   }
 
+  /** HTTP sign-of-life. An agent-played room may have NO websocket members at
+   * all (the D4 BYO surface), so every API touch pushes the sweep horizon the
+   * way a live socket would. No-op while sockets are attached. */
+  touch(): void {
+    if (this.empty) this.emptyAt = Date.now()
+  }
+
   /** Which seat+surface does this token belong to? The ws/HTTP layers tag every
    * command with the answer — the hinge check lives on the server, not the client. */
   auth(token: string): { seat: number; role: Role } | null {
@@ -90,16 +116,14 @@ export class Room {
     switch (msg.type) {
       case 'join': return this.join(ws, msg.name, msg.key)
       case 'watch': return this.watch(ws)
-      case 'start': return this.start(ws, msg.token, msg.tickMs, msg.round1Ticks, msg.round2Ticks)
+      case 'start': {
+        const r = this.tryStart(msg.token, msg.tickMs, msg.round1Ticks, msg.round2Ticks)
+        if (!r.ok) send(ws, { type: 'error', message: r.error })
+        return
+      }
       case 'phase': {
-        // advancing the weave is a host act on the human surface — like start
-        const who = this.auth(msg.token)
-        if (!who) return send(ws, { type: 'error', message: 'bad token' })
-        if (who.seat !== 0) return send(ws, { type: 'error', message: 'Only the host advances the round.' })
-        if (who.role !== 'hinge') return send(ws, { type: 'error', message: 'Advancing the round is a human act — use the hinge token.' })
-        const r = this.command({ t: 'phase', to: msg.to })
-        if (!r.ok) return send(ws, { type: 'error', message: r.error })
-        this.lastTickAt = Date.now() // a fresh round gets a full tick interval
+        const r = this.tryPhase(msg.token, msg.to)
+        if (!r.ok) send(ws, { type: 'error', message: r.error })
         return
       }
       case 'draft': {
@@ -141,6 +165,10 @@ export class Room {
       case 'disarm': {
         const who = this.auth(msg.token)
         if (!who) return send(ws, { type: 'error', message: 'bad token' })
+        // D4 tightening (per the D3 flag): disarm is script-LIFECYCLE control,
+        // so it lives on the human surface with arm. The oracle's autoDisarm
+        // is sim-internal and unaffected.
+        if (who.role !== 'hinge') return send(ws, { type: 'error', message: 'Disarm is script-lifecycle control — use the hinge token.' })
         const r = this.command({ t: 'disarm', player: who.seat, id: msg.id })
         if (!r.ok) send(ws, { type: 'error', message: r.error })
         return
@@ -163,40 +191,40 @@ export class Room {
     return false
   }
 
-  private join(ws: WebSocket, rawName: string, rawKey: string): void {
+  /** Seat a player — or reconnect one by key with the SAME tokens (chips'
+   * rejoin-by-key pattern). Shared by ws join and HTTP join (D4): a started
+   * room admits reconnects only; a full room refuses. */
+  seatJoin(rawName: string, rawKey: string): { ok: true; seat: number; rejoined: boolean } | Refusal {
     const name = (rawName || '').trim().slice(0, 16) || 'Player'
     const key = (rawKey || '').slice(0, 40)
-    if (!key) {
+    const reI = key ? this.seats.findIndex((s) => s.key === key) : -1
+    if (reI >= 0) return { ok: true, seat: reI, rejoined: true }
+    if (this.started) return { ok: false, error: 'That game already started. Try another room code.', code: 409 }
+    if (this.seats.length >= MAX_PLAYERS) return { ok: false, error: 'This room is full.', code: 409 }
+    const index = this.seats.length
+    this.seats.push({ key, name, workerToken: mintToken('w'), hingeToken: mintToken('h') })
+    return { ok: true, seat: index, rejoined: false }
+  }
+
+  private join(ws: WebSocket, rawName: string, rawKey: string): void {
+    if (!rawKey) {
       send(ws, { type: 'error', message: 'missing client key' })
       return
     }
-    // reconnect: the same localStorage key reclaims its seat (mid-game too),
-    // with the SAME tokens — chips' rejoin-by-key pattern.
-    const reI = this.seats.findIndex((s) => s.key === key)
-    if (reI >= 0) {
-      const prev = [...this.members.entries()].find(([, idx]) => idx === reI)?.[0]
+    const r = this.seatJoin(rawName, rawKey)
+    if (!r.ok) {
+      send(ws, { type: 'error', message: r.error })
+      return
+    }
+    if (r.rejoined) {
+      const prev = [...this.members.entries()].find(([, idx]) => idx === r.seat)?.[0]
       if (prev && prev !== ws) prev.close() // one live socket per seat — new tab supersedes
-      this.members.set(ws, reI)
-      this.emptyAt = null
-      this.welcome(ws, reI)
-      this.broadcastLobby()
-      this.pushSnapshots()
-      return
     }
-    if (this.started) {
-      send(ws, { type: 'error', message: 'That game already started. Try another room code.' })
-      return
-    }
-    if (this.seats.length >= MAX_PLAYERS) {
-      send(ws, { type: 'error', message: 'This room is full.' })
-      return
-    }
-    const index = this.seats.length
-    this.seats.push({ key, name, workerToken: mintToken('w'), hingeToken: mintToken('h') })
-    this.members.set(ws, index)
+    this.members.set(ws, r.seat)
     this.emptyAt = null
-    this.welcome(ws, index)
+    this.welcome(ws, r.seat)
     this.broadcastLobby()
+    if (r.rejoined) this.pushSnapshots()
   }
 
   private watch(ws: WebSocket): void {
@@ -206,23 +234,44 @@ export class Room {
     if (this.started) send(ws, { type: 'snapshot', view: this.viewFor(null) })
   }
 
-  private start(ws: WebSocket, token: string, tickMs?: number, round1Ticks?: number, round2Ticks?: number): void {
+  /** Room settings preset at creation (the HTTP create body) — the same clamps
+   * start applies, held as the start defaults so dev-fast rooms stay possible. */
+  configure(opts: { tickMs?: number; round1Ticks?: number; round2Ticks?: number }): void {
+    if (typeof opts.tickMs === 'number') this.tickMs = Math.max(TICK_MS_MIN, Math.min(TICK_MS_MAX, Math.floor(opts.tickMs)))
+    if (typeof opts.round1Ticks === 'number') this.presetRound1 = clampRound(opts.round1Ticks, ROUND1_TICKS_DEFAULT)
+    if (typeof opts.round2Ticks === 'number') this.presetRound2 = clampRound(opts.round2Ticks, ROUND2_TICKS_DEFAULT)
+  }
+
+  /** Start the game — a HOST act on the HUMAN surface (hinge token, seat 0).
+   * Shared by ws start and HTTP start; the refusal carries the HTTP status. */
+  tryStart(token: string, tickMs?: number, round1Ticks?: number, round2Ticks?: number): { ok: true } | Refusal {
     const who = this.auth(token)
-    if (!who) return send(ws, { type: 'error', message: 'bad token' })
-    if (who.seat !== 0) return send(ws, { type: 'error', message: 'Only the host can start the game.' })
-    if (who.role !== 'hinge') return send(ws, { type: 'error', message: 'Starting the game is a human act — use the hinge token.' })
-    if (this.started) return
+    if (!who) return { ok: false, error: 'missing or unknown token', code: 401 }
+    if (who.seat !== 0) return { ok: false, error: 'Only the host can start the game.', code: 403 }
+    if (who.role !== 'hinge') return { ok: false, error: 'Starting the game is a human act — use the hinge token.', code: 403 }
+    if (this.started) return { ok: false, error: 'The game already started.', code: 409 }
     if (tickMs !== undefined) this.tickMs = Math.max(TICK_MS_MIN, Math.min(TICK_MS_MAX, Math.floor(tickMs)))
-    const clampRound = (v: number | undefined, dflt: number): number =>
-      v === undefined ? dflt : Math.max(ROUND_TICKS_MIN, Math.min(ROUND_TICKS_MAX, Math.floor(v)))
     this.sim = newGame(this.seed, this.seats.length, this.seats.map((s) => s.name), {
-      round1: clampRound(round1Ticks, ROUND1_TICKS_DEFAULT),
-      round2: clampRound(round2Ticks, ROUND2_TICKS_DEFAULT),
+      round1: clampRound(round1Ticks ?? this.presetRound1, ROUND1_TICKS_DEFAULT),
+      round2: clampRound(round2Ticks ?? this.presetRound2, ROUND2_TICKS_DEFAULT),
     })
     this.started = true
     this.lastTickAt = Date.now()
     this.broadcastLobby()
     this.pushSnapshots()
+    return { ok: true }
+  }
+
+  /** Advance the weave — the same host-hinge act as start. Shared ws + HTTP. */
+  tryPhase(token: string, to: SimPhase): { ok: true } | Refusal {
+    const who = this.auth(token)
+    if (!who) return { ok: false, error: 'missing or unknown token', code: 401 }
+    if (who.seat !== 0) return { ok: false, error: 'Only the host advances the round.', code: 403 }
+    if (who.role !== 'hinge') return { ok: false, error: 'Advancing the round is a human act — use the hinge token.', code: 403 }
+    const r = this.command({ t: 'phase', to })
+    if (!r.ok) return { ok: false, error: r.error, code: 409 }
+    this.lastTickAt = Date.now() // a fresh round gets a full tick interval
+    return { ok: true }
   }
 
   /** Apply a seat-stamped command; log it on success. Shared by ws and HTTP. */
@@ -340,7 +389,7 @@ export class Room {
     return this.seats.map((s, i) => ({ index: i, name: s.name, online: this.online(i) }))
   }
 
-  private broadcastLobby(): void {
+  broadcastLobby(): void {
     const players = this.lobbyPlayers()
     for (const [ws, idx] of this.members) {
       send(ws, { type: 'lobby', room: this.code, players, isHost: idx === 0, started: this.started, tickMs: this.tickMs })
@@ -512,7 +561,10 @@ export class RoomRegistry {
     if (!room) return
     room.handleClose(ws)
     this.socketRoom.delete(ws)
-    if (room.empty && !room.started) this.rooms.delete(room.code)
+    // instant-delete only NEVER-SEATED rooms (a watcher peeked and left); a
+    // seated lobby may hold HTTP-joined agents with no socket — the sweep's
+    // TTL owns those (Room.touch keeps live ones alive).
+    if (room.empty && !room.started && room.seats.length === 0) this.rooms.delete(room.code)
   }
 
   /** Drop rooms abandoned longer than ttlMs so idle sims don't tick forever. */

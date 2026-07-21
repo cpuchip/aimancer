@@ -40,6 +40,33 @@
     ws?.send(JSON.stringify(msg))
   }
 
+  // ── Connect your agent (D4, BYO-AI): the phone holds the HINGE; the agent
+  // gets a paste-prompt carrying the WORKER token. The server's agent-prompt
+  // route is the single source of truth for the text — fetched eagerly on
+  // welcome so the copy button can write the clipboard inside the tap gesture.
+  let agentPrompt = $state('')
+  let copied = $state(false)
+  let promptOpen = $state(false)
+  async function loadAgentPrompt(): Promise<void> {
+    try {
+      const r = await fetch(`/api/room/${room}/agent-prompt?token=${encodeURIComponent(workerToken)}`)
+      if (r.ok) agentPrompt = await r.text()
+    } catch {
+      /* offline blip — the panel just shows the button disabled */
+    }
+  }
+  function copyAgentPrompt(): void {
+    navigator.clipboard?.writeText(agentPrompt).then(
+      () => {
+        copied = true
+        setTimeout(() => (copied = false), 2500)
+      },
+      () => {
+        promptOpen = true // no clipboard (http dev) — open the preview to long-press copy
+      },
+    )
+  }
+
   function connect(create: boolean): void {
     lastError = ''
     ws = new WebSocket(wsUrl())
@@ -52,6 +79,7 @@
         room = msg.room
         workerToken = msg.workerToken
         hingeToken = msg.hingeToken
+        void loadAgentPrompt() // eager, so the copy button works in one tap
       }
       if (msg.type === 'lobby') started = msg.started
       if (msg.type === 'snapshot') {
@@ -119,6 +147,30 @@
   const myDelta = $derived(view?.delta && me ? view.delta.players[me.index] : null)
 </script>
 
+{#snippet connectAgent()}
+  <!-- Two surfaces, cleanly split: this phone = the HINGE (arming lives here);
+       the pasted prompt = the WORKER surface for the player's OWN agent. -->
+  <div class="card stack">
+    <h2 style="margin-top:0">🤖 Connect your agent</h2>
+    <p class="muted">
+      Your apprentice is YOUR agent — Claude Code, codex, copilot… Copy this
+      prompt and paste it in: your agent drafts over HTTP, and the ARM buttons
+      stay here on your phone.
+    </p>
+    <button class="primary" onclick={copyAgentPrompt} disabled={!agentPrompt}>
+      {copied ? '✓ copied — paste it into your agent' : '📋 Copy the agent prompt'}
+    </button>
+    <p class="faint">
+      Your agent will ask before each curl — approve it; that's the point.
+      No agent? The card buttons + "ask for drafts" play the same game.
+    </p>
+    <details bind:open={promptOpen}>
+      <summary class="faint">preview the prompt</summary>
+      <pre class="mono faint" style="white-space:pre-wrap;word-break:break-all">{agentPrompt}</pre>
+    </details>
+  </div>
+{/snippet}
+
 {#if !joined}
   <h1>AIMANCER</h1>
   <p class="muted">Your AI apprentice drafts the scripts. Only YOU can arm them.</p>
@@ -152,6 +204,7 @@
         <p class="faint">Round lengths: 12 + 19 ticks (defaults).</p>
       {/if}
     </div>
+    {@render connectAgent()}
   {:else}
     {#if myShop}
       <div class="stats">
@@ -278,10 +331,6 @@
       {#each eventLog as line, i (i)}<div>{line}</div>{/each}
     </div>
 
-    <details>
-      <summary class="faint">agent tokens (D3/D4: hand these to your apprentice)</summary>
-      <pre class="mono faint" style="white-space:pre-wrap;word-break:break-all">worker: {workerToken}
-(the hinge token stays on YOUR phone)</pre>
-    </details>
+    {@render connectAgent()}
   {/if}
 {/if}

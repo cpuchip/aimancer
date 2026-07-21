@@ -51,21 +51,32 @@ never re-call a model.
 
 ## HTTP API (the BYO-agent surface)
 
-Auth: an `Authorization` header carrying `Bearer <token>` (or `?token=` in
-the query string). Every seat holds TWO
-tokens from the ws `welcome`: a **worker token** (the AI surface) and a
-**hinge token** (the human surface). ARM REQUIRES THE HINGE — there is no
-AI-reachable arm path, by design.
+**v1 is BYO-AI:** every seat's apprentice is the player's OWN agent (Claude
+Code / codex / copilot — anything that can curl). The human joins on their
+phone, taps **Connect your agent**, and pastes the generated prompt into their
+agent; the agent plays the worker surface over this API while the ARM buttons
+stay on the phone. Agents without a human can create/join rooms directly.
+
+Auth: an `Authorization` header carrying `Bearer <token>` (or `?token=` in the
+query string). Every seat holds TWO tokens (from the ws `welcome` or the HTTP
+create/join response): a **worker token** (the AI surface) and a **hinge
+token** (the human surface). ARM REQUIRES THE HINGE — there is no AI-reachable
+arm path, by design.
 
 | Route | Method | Token | Does |
 |---|---|---|---|
+| `/api/room` | POST | — | create a room; creator = host, seat 0. Optional `{name, tickMs, round1Ticks, round2Ticks}` presets (dev-fast from curl). Returns `{pin, seat, name, key, workerToken, hingeToken}` |
+| `/api/room/:pin/join` | POST | — | join by PIN: `{name?, key?}`. The same `key` reconnects to the SAME seat + tokens; omit it and one is minted and returned |
+| `/api/room/:pin/agent-prompt` | GET | **worker** | the ready-to-paste "connect your agent" text (single source of truth); never carries the hinge token |
+| `/api/room/:pin/start` | POST | host **hinge** | `{tickMs?, round1Ticks?, round2Ticks?}` — start the game |
+| `/api/room/:pin/phase` | POST | host **hinge** | `{to}` — advance the weave (round1→intermission→round2→reveal) |
 | `/api/room/:pin/state` | GET | any/none | redacted room view (a seat token adds `you.hand` + `you.pending`) |
 | `/api/room/:pin/log` | GET | any/none | command log + seed (other seats' draft bodies stripped; host unlocks all in reveal) |
 | `/api/room/:pin/draft` | POST | worker | `{script, tier?}` — submit a script you wrote (costs tier price) |
-| `/api/room/:pin/draft-request` | POST | either | `{tier, order?}` — ask the apprentice; debits now, drafts arrive async (poll state) |
+| `/api/room/:pin/draft-request` | POST | either | `{tier, order?}` — ask the practice generator (or a wired model); debits now, drafts arrive async (poll state) |
 | `/api/room/:pin/oracle` | POST | either | `{id}` — paid verify; returns the verdict + 3-tick dry-run report (round 2 only) |
 | `/api/room/:pin/arm` | POST | **hinge** | `{id}` — the human act; worker tokens get 403 |
-| `/api/room/:pin/disarm` | POST | either | `{id}` — turning OFF is always safe |
+| `/api/room/:pin/disarm` | POST | **hinge** | `{id}` — script-lifecycle control lives with arm (tightened D4) |
 | `/api/room/:pin/scrap` | POST | either | `{id}` — free an (unarmed) hand slot |
 
 Errors are always `{ ok: false, error }`: **401** no/unknown token · **403**
@@ -73,8 +84,11 @@ wrong surface (e.g. worker tries to arm) · **404** no such room · **405**
 wrong method · **409** the sim refused, with the spoken reason (round-1
 oracle, not enough tokens, armed scrap…) · **400** malformed body.
 
-Joining/creating rooms is ws-only for now (`{type:'join'}` on `/ws`); D4 adds
-the agent join flow + MCP surface on top of this API.
+The Go client kit + reference bot lives at
+[cpuchip/aimancer-go](https://github.com/cpuchip/aimancer-go) —
+`aimancer-play -url <server> -pin <PIN> -name Bot` puts an autonomous seat in
+any room. The paste-prompt never asks an agent to bypass its own permission
+prompts: one approval click per curl is the design.
 
 ## The shape
 

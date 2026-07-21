@@ -24,10 +24,46 @@ The build week (from the design doc, D1 = 2026-07-21):
       2-3-draft batch): order → drafts → oracle caught 4 injected flaws →
       verified chain SHIPPED (`npm run liveproof` = the rehearsal driver).
       Gates: smoke 196 · wstest 113.
-- [ ] **D4** — BYO surface: REST/MCP for outside agents + big screen.
+- [x] **D4** — the BYO-AI day (★ PIVOT ruled: v1 is BYO-AI ONLY — every
+      seat's apprentice is the player's OWN agent; hosted apprentice DORMANT,
+      not deleted). HTTP room lifecycle (`POST /api/room` create +
+      `/join` w/ reconnect-by-key + `/start` + `/phase`, host-hinge rules
+      mirrored, HTTP-only rooms sweep-safe via touch()) + `GET
+      /api/room/:pin/agent-prompt` (the paste-prompt, single source of truth;
+      worker-token-only, never carries the hinge, never teaches arm, never
+      asks an agent to bypass its own permission prompts) + phone "Connect
+      your agent" panel (copy button; hinge stays on the phone) + `disarm`
+      TIGHTENED to hinge-only (ws + HTTP — script-lifecycle control) +
+      `cpuchip/aimancer-go` client kit (package + `aimancer-play` bot CLI) +
+      `scripts/loom-bots.ps1` (loom-driven copilot/codex seat-filler bots).
+      Gates: smoke 196 · wstest 149.
 - [ ] **D5** — presentation weave (round switcher, delta board, replay
       theater) + assets + polish.
 - [ ] **D6** — family+Dave playtest → fix → dress rehearsal.
+
+## D4 rulings + notes (for the D5 brief)
+
+- **BYO-AI pivot is live end-to-end:** phone join → "Connect your agent" →
+  paste into Claude Code/codex/copilot → the agent drafts over HTTP with the
+  worker token; the phone keeps the hinge. Full HTTP lifecycle proven in
+  wstest with NO websocket anywhere (create→join→draft→oracle→arm→state).
+- **`start`/`phase` joined the HTTP mirror** (host-hinge only, same rules as
+  ws). The brief listed only create/join, but the full-loop test requires
+  reaching round 2 (oracle is round-2-only) and the loom-bots runner needs a
+  ws-free way to run a room — the mirror-ws-semantics rule covers both.
+- **`disarm` is now HINGE-only on BOTH surfaces** (the D3 flag, ruled in the
+  D4 brief): script-lifecycle control lives with arm. The phone UI already
+  used the hinge; wstest asserts the 403 on ws and HTTP.
+- **HTTP-only rooms and the sweeper:** a room played entirely over HTTP has
+  no sockets, so every API call `touch()`es the room (pushes the 30-min empty
+  TTL); instant-delete on socket-close now applies only to never-seated
+  rooms. Without this, an agent-only room would never be reaped (emptyAt
+  stayed null) — or a passing watcher's disconnect would delete it mid-game.
+- **Practice generator + hand-authoring are the no-agent floor** (both
+  pre-D4); `draft-request` stays either-token and works for HTTP seats.
+- The agent-prompt embeds the room's CURRENT tickMs at fetch time; if the
+  host later starts with a different tick, the pacing hint is stale (cosmetic
+  — state carries the truth). D5 could re-fetch after start if it matters.
 
 ## D3 rulings + notes (for the D4 brief)
 

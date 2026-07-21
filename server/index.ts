@@ -1,15 +1,19 @@
 // AIMANCER server — serves the built client (dist/) plus /healthz and /version
 // (the deploy oracle), hosts the authoritative rooms on a same-origin
-// WebSocket at /ws, AND exposes the FULL HTTP action mirror (the BYO-agent
-// surface — everything a seat can do over ws works over HTTP; D4 adds the
-// join prompt + MCP on top):
+// WebSocket at /ws, AND exposes the FULL HTTP surface (the BYO-agent surface —
+// everything a seat can do over ws works over HTTP, room lifecycle included):
+//   POST /api/room                     — create a room (creator = host, seat 0)
+//   POST /api/room/:pin/join          — join by PIN (reconnect-by-key honored)
+//   GET  /api/room/:pin/agent-prompt  — WORKER token: the ready-to-paste prompt
+//   POST /api/room/:pin/start         — HOST hinge: start the game
+//   POST /api/room/:pin/phase         — HOST hinge: advance the weave
 //   GET  /api/room/:pin/state          — redacted per token (public without one)
 //   GET  /api/room/:pin/log            — command log + seed, redacted per token
 //   POST /api/room/:pin/draft         — WORKER token: submit a script directly
 //   POST /api/room/:pin/draft-request — either token: ask the apprentice (async)
 //   POST /api/room/:pin/oracle        — either token: paid verify + dry-run report
 //   POST /api/room/:pin/arm           — HINGE token ONLY (the hinge, always)
-//   POST /api/room/:pin/disarm        — either token (turning OFF is always safe)
+//   POST /api/room/:pin/disarm        — HINGE token (script-lifecycle control, D4)
 //   POST /api/room/:pin/scrap         — either token (freeing a slot is safe)
 // Error shape everywhere: { ok: false, error } with 401 (no/unknown token),
 // 403 (wrong surface), 404 (no room), 405 (method), 409 (sim rule refused —
@@ -20,9 +24,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync, existsSync, readFile } from 'node:fs'
 import { extname, join, normalize } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
-import { RoomRegistry, type Room } from './rooms.ts'
+import { mintKey, RoomRegistry, type Room } from './rooms.ts'
+import { buildAgentPrompt } from './agentPrompt.ts'
 import { oracle } from '../shared/sim/oracle.ts'
-import type { DraftTier, Script } from '../shared/sim/types.ts'
+import type { DraftTier, Script, SimPhase } from '../shared/sim/types.ts'
 
 const PORT = Number(process.env.PORT ?? 8080)
 const DIST = join(process.cwd(), 'dist')
@@ -83,9 +88,39 @@ function readBody(req: IncomingMessage): Promise<string> {
   })
 }
 
+/** The base URL the OUTSIDE world uses to reach us — for the paste-prompt.
+ * Behind the house proxy the forwarded headers carry the public name. */
+function externalBase(req: IncomingMessage): string {
+  const first = (v: unknown): string => String(v ?? '').split(',')[0].trim()
+  const proto = first(req.headers['x-forwarded-proto']) || 'http'
+  const host = first(req.headers['x-forwarded-host']) || first(req.headers.host) || `localhost:${PORT}`
+  return `${proto}://${host}`
+}
+
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  // POST /api/room — create a room over HTTP (D4). The creator is seated as
+  // host (seat 0) and gets BOTH tokens; optional body presets the room knobs
+  // (dev-fast rooms stay possible from curl alone).
+  if (url.pathname === '/api/room') {
+    if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' })
+    let body: { name?: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number }
+    try {
+      body = JSON.parse((await readBody(req)) || '{}')
+    } catch {
+      return sendJson(res, 400, { ok: false, error: 'invalid JSON body' })
+    }
+    const room = registry.create()
+    room.configure({ tickMs: body.tickMs, round1Ticks: body.round1Ticks, round2Ticks: body.round2Ticks })
+    const seated = room.seatJoin(typeof body.name === 'string' ? body.name : '', mintKey())
+    if (!seated.ok) return sendJson(res, seated.code, { ok: false, error: seated.error }) // unreachable on a fresh room; belt+braces
+    const seat = room.seats[seated.seat]
+    room.touch()
+    sendJson(res, 200, { ok: true, pin: room.code, seat: seated.seat, name: seat.name, key: seat.key, workerToken: seat.workerToken, hingeToken: seat.hingeToken })
+    return
+  }
+
   // /api/room/:pin/:action
-  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/(state|draft|draft-request|oracle|arm|disarm|scrap|log)$/)
+  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/(state|draft|draft-request|oracle|arm|disarm|scrap|log|join|start|phase|agent-prompt)$/)
   if (!m) {
     sendJson(res, 404, { ok: false, error: 'unknown api route' })
     return
@@ -95,9 +130,50 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     sendJson(res, 404, { ok: false, error: `no room '${m[1].toUpperCase()}'` })
     return
   }
+  room.touch() // HTTP sign-of-life: agent-played rooms have no sockets to keep them alive
   const action = m[2]
   const token = bearerToken(req, url)
   const who = room.auth(token)
+
+  if (action === 'join') {
+    // join by PIN. Reconnect-by-key returns the SAME seat + tokens (agents
+    // resume cleanly); no key in the body mints one and returns it.
+    if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' })
+    let body: { name?: string; key?: string }
+    try {
+      body = JSON.parse((await readBody(req)) || '{}')
+    } catch {
+      return sendJson(res, 400, { ok: false, error: 'invalid JSON body' })
+    }
+    const key = typeof body.key === 'string' && body.key ? body.key : mintKey()
+    const seated = room.seatJoin(typeof body.name === 'string' ? body.name : '', key)
+    if (!seated.ok) return sendJson(res, seated.code, { ok: false, error: seated.error })
+    const seat = room.seats[seated.seat]
+    room.broadcastLobby() // phones in the lobby see the agent arrive
+    sendJson(res, 200, { ok: true, pin: room.code, seat: seated.seat, rejoined: seated.rejoined, name: seat.name, key: seat.key, workerToken: seat.workerToken, hingeToken: seat.hingeToken })
+    return
+  }
+
+  if (action === 'agent-prompt') {
+    // the ready-to-paste "connect your agent" text — the phone renders + copies
+    // it. WORKER token only: the text embeds that very token, and the hinge
+    // stays on the phone (401 unknown, 403 hinge — the wrong surface to ask).
+    if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'GET only' })
+    if (!who) return sendJson(res, 401, { ok: false, error: 'missing or unknown token' })
+    if (who.role !== 'worker') {
+      return sendJson(res, 403, { ok: false, error: 'the agent prompt embeds the WORKER token — fetch it with the worker token (the hinge stays on your phone)' })
+    }
+    const text = buildAgentPrompt({
+      baseUrl: externalBase(req),
+      pin: room.code,
+      name: room.seats[who.seat].name,
+      workerToken: token,
+      tickMs: room.tickMs,
+    })
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end(text)
+    return
+  }
 
   if (action === 'state') {
     if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'GET only' })
@@ -118,7 +194,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' })
   if (!who) return sendJson(res, 401, { ok: false, error: 'missing or unknown token' })
 
-  let body: { script?: Script; tier?: DraftTier; id?: string; order?: string }
+  let body: { script?: Script; tier?: DraftTier; id?: string; order?: string; tickMs?: number; round1Ticks?: number; round2Ticks?: number; to?: string }
   try {
     body = JSON.parse((await readBody(req)) || '{}')
   } catch {
@@ -128,6 +204,24 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   // sim rule refused (wrong phase, no tokens, no such script…) → 409 + the
   // spoken reason; the request was well-formed, the GAME said no.
   const refused = (r: { ok: false; error: string }) => sendJson(res, 409, { ok: false, error: r.error })
+
+  if (action === 'start') {
+    // starting is a HOST act on the HUMAN surface — tryStart carries the same
+    // rules ws enforces and hands back the status for the refusal.
+    const r = room.tryStart(token, body.tickMs, body.round1Ticks, body.round2Ticks)
+    if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
+    sendJson(res, 200, { ok: true, pin: room.code, tickMs: room.tickMs })
+    return
+  }
+
+  if (action === 'phase') {
+    // advancing the weave — same host-hinge act as start.
+    if (typeof body.to !== 'string') return sendJson(res, 400, { ok: false, error: 'missing to' })
+    const r = room.tryPhase(token, body.to as SimPhase)
+    if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
+    sendJson(res, 200, { ok: true, phase: body.to })
+    return
+  }
 
   if (action === 'draft') {
     if (who.role !== 'worker') {
@@ -174,7 +268,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   }
 
   if (action === 'disarm') {
-    // turning OFF is always safe — either surface may pull the plug (matches ws)
+    // D4 tightening (the D3 flag, ruled): disarm is script-LIFECYCLE control,
+    // so it lives with arm on the human surface — matches ws.
+    if (who.role !== 'hinge') {
+      return sendJson(res, 403, { ok: false, error: 'Disarm is script-lifecycle control — use the hinge token.' })
+    }
     if (!body.id) return sendJson(res, 400, { ok: false, error: 'missing id' })
     const r = room.command({ t: 'disarm', player: who.seat, id: body.id })
     if (!r.ok) return refused(r)

@@ -9,9 +9,12 @@
 // tokens, the ASYNC APPRENTICE round-trip against a hermetic fake OpenAI
 // endpoint (debit-now, drafts-arrive-later, fenced-JSON tolerance, gibberish
 // fallback, timeout+refund), the FULL HTTP action mirror (oracle/disarm/
-// scrap/draft-request — token rules + 409 sim refusals), practice mode on a
-// second unconfigured server, and the REDACTION AUDIT: other players' hands
-// and ALL auth tokens never cross the wire to the wrong seat.
+// scrap/draft-request — token rules + 409 sim refusals), the D4 HTTP ROOM
+// LIFECYCLE (create/join/reconnect-by-key/start/phase + the agent paste-prompt
+// — a full create→join→draft→oracle→arm→state loop with no websocket at all),
+// practice mode on a second unconfigured server, and the REDACTION AUDIT:
+// other players' hands and ALL auth tokens never cross the wire to the wrong
+// seat.
 
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
@@ -459,6 +462,12 @@ async function main(): Promise<void> {
     await bob2.waitView((v) => v.you!.hand[0].armed === true, 'verified arm landed')
     ok(bob2.view!.you!.hand[0].yolo === false, 'an oracle-green arm is NOT a YOLO')
 
+    // D4 tightening: disarm joined arm on the human surface (ws too)
+    bob2.send({ type: 'disarm', token: bob2.welcome!.workerToken, id: 'bob-s3' })
+    await bob2.waitFor((m) => m.type === 'error' && m.message.includes('hinge'), 'worker disarm rejected')
+    ok(true, 'ws disarm with the WORKER token REJECTED (script-lifecycle control is a hinge act)')
+    ok(bob2.view!.you!.hand[0].armed === true, 'and the script stayed armed')
+
     // ── Scrap over the wire ──────────────────────────────────────────────────
     bob2.send({ type: 'scrap', token: bob2.welcome!.hingeToken, id: 'bob-s3' })
     await bob2.waitFor((m) => m.type === 'error' && m.message.includes('disarm'), 'armed scrap rejected')
@@ -616,15 +625,21 @@ async function main(): Promise<void> {
       body: JSON.stringify({ id: 'dv1' }),
     })
     ok(armHttp.status === 200, 'HTTP arm (hinge) lands')
-    const disarmHttp = await fetch(`${BASE}/api/room/${davePin}/disarm`, {
+    const disarmWorker = await fetch(`${BASE}/api/room/${davePin}/disarm`, {
       method: 'POST',
       headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({ id: 'dv1' }),
     })
-    ok(disarmHttp.status === 200, 'HTTP disarm with the WORKER token lands (turning OFF is always safe — matches ws)')
+    ok(disarmWorker.status === 403, 'HTTP disarm with the WORKER token → 403 (D4 tightening: script-lifecycle control is a hinge act)')
+    const disarmHttp = await fetch(`${BASE}/api/room/${davePin}/disarm`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${dave.welcome!.hingeToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'dv1' }),
+    })
+    ok(disarmHttp.status === 200, 'HTTP disarm with the HINGE token lands')
     const disarmAgain = await fetch(`${BASE}/api/room/${davePin}/disarm`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${dave.welcome!.workerToken}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${dave.welcome!.hingeToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({ id: 'dv1' }),
     })
     const disarmAgainBody = await disarmAgain.json()
@@ -667,6 +682,69 @@ async function main(): Promise<void> {
     })
     const revealReqBody = await revealReq.json()
     ok(revealReq.status === 409 && revealReqBody.error.includes('over'), 'draft-request after the reveal → 409 (the game is a museum)')
+
+    // ── D4: HTTP ROOM LIFECYCLE — create → join → play, no websocket anywhere ─
+    const post = (path: string, tok: string | null, bodyObj?: unknown) =>
+      fetch(`${BASE}${path}`, {
+        method: 'POST',
+        headers: tok ? { 'content-type': 'application/json', authorization: `Bearer ${tok}` } : { 'content-type': 'application/json' },
+        body: JSON.stringify(bodyObj ?? {}),
+      })
+
+    const createRes = await post('/api/room', null, { name: 'Hera', tickMs: 60000, round1Ticks: 3, round2Ticks: 3 })
+    const hera = await createRes.json()
+    ok(createRes.status === 200 && hera.ok && new RegExp(`^[${CODE_ALPHABET}]{4}$`).test(hera.pin), `HTTP create opens a room (${hera.pin})`)
+    ok(hera.seat === 0 && hera.workerToken.startsWith('w_') && hera.hingeToken.startsWith('h_'), 'HTTP creator seated as HOST (seat 0) with both tokens')
+    ok(typeof hera.key === 'string' && hera.key.length > 0, 'create mints a reconnect key')
+    ok((await fetch(`${BASE}/api/room`)).status === 405, 'GET /api/room → 405')
+    const other = await (await post('/api/room', null)).json()
+    ok(other.ok && other.pin !== hera.pin, `a second create gets a DISTINCT pin (${other.pin} ≠ ${hera.pin} — collisions handled by mint-until-unique)`)
+
+    const ivanRes = await post(`/api/room/${hera.pin}/join`, null, { name: 'Ivan' })
+    const ivan = await ivanRes.json()
+    ok(ivanRes.status === 200 && ivan.ok && ivan.seat === 1, 'HTTP join by PIN seats the agent (seat 1)')
+    ok(ivan.workerToken !== hera.workerToken && ivan.workerToken.startsWith('w_') && ivan.hingeToken.startsWith('h_'), 'the joiner gets its OWN token pair')
+    const ivan2 = await (await post(`/api/room/${hera.pin}/join`, null, { name: 'Ivan', key: ivan.key })).json()
+    ok(ivan2.ok && ivan2.seat === 1 && ivan2.rejoined === true && ivan2.workerToken === ivan.workerToken && ivan2.hingeToken === ivan.hingeToken, 'HTTP reconnect-by-key: same seat, SAME tokens back')
+    ok((await post('/api/room/OOOO/join', null, { name: 'Ghost' })).status === 404, 'HTTP join on a nonexistent PIN → 404 (O is not even in the alphabet)')
+
+    // the paste-prompt (the phone's "Connect your agent" panel reads this)
+    const apRes = await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt?token=${ivan.workerToken}`)
+    const ap = await apRes.text()
+    ok(apRes.status === 200 && ap.includes(hera.pin) && ap.includes(ivan.workerToken), 'agent-prompt returns the paste-prompt: PIN + WORKER token inside')
+    ok(!ap.includes(ivan.hingeToken) && !ap.includes(hera.hingeToken), 'the paste-prompt NEVER carries a hinge token')
+    ok(!ap.includes(`/api/room/${hera.pin}/arm`), 'the paste-prompt teaches NO arm endpoint')
+    ok(ap.toLowerCase().includes('approve the curl') && ap.toLowerCase().includes('arms on their phone'), 'the paste-prompt keeps the covenant: approve-the-curl + your-human-arms-on-their-phone')
+    ok(ap.toLowerCase().includes('never bypass'), 'the paste-prompt forbids bypassing the agent\'s own permission prompts')
+    ok((await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt?token=${ivan.hingeToken}`)).status === 403, 'agent-prompt with a HINGE token → 403 (wrong surface to ask)')
+    ok((await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt`)).status === 401, 'agent-prompt with no token → 401')
+
+    // start: a HOST act on the HUMAN surface, over HTTP
+    ok((await post(`/api/room/${hera.pin}/start`, ivan.hingeToken)).status === 403, 'HTTP start by a non-host seat → 403')
+    ok((await post(`/api/room/${hera.pin}/start`, hera.workerToken)).status === 403, 'HTTP start with the host WORKER token → 403 (starting is a human act)')
+    ok((await post(`/api/room/${hera.pin}/start`, hera.hingeToken)).status === 200, 'HTTP start with the host hinge lands')
+    const st0 = await (await fetch(`${BASE}/api/room/${hera.pin}/state`, { headers: { authorization: `Bearer ${ivan.workerToken}` } })).json()
+    ok(st0.ok && st0.view.started && st0.view.tickMs === 60000 && st0.view.ticksRemaining === 3, 'create-time presets held through start: 60s tick + round-1 budget 3 (dev-fast from curl alone)')
+    ok((await post(`/api/room/${hera.pin}/start`, hera.hingeToken)).status === 409, 'double-start → 409')
+
+    // the full BYO loop, HTTP only. h1 proves the token split; h2 (never
+    // armed, so it CARRIES into round 2) proves draft → oracle → verified arm.
+    ok((await post(`/api/room/${hera.pin}/draft`, ivan.workerToken, { script: { id: 'h1', verb: 'harvest', params: { rate: 3 } }, tier: 'cheap' })).status === 200, 'loop: the agent drafts its OWN script over HTTP (BYO — no server LLM anywhere)')
+    ok((await post(`/api/room/${hera.pin}/arm`, ivan.workerToken, { id: 'h1' })).status === 403, 'loop: the agent CANNOT arm (worker token → 403; the hinge holds)')
+    ok((await post(`/api/room/${hera.pin}/arm`, ivan.hingeToken, { id: 'h1' })).status === 200, "loop: the human's hinge arms it (YOLO in round 1)")
+    ok((await post(`/api/room/${hera.pin}/disarm`, ivan.workerToken, { id: 'h1' })).status === 403, 'loop: worker disarm → 403 (D4 tightening — lifecycle is the hinge)')
+    ok((await post(`/api/room/${hera.pin}/disarm`, ivan.hingeToken, { id: 'h1' })).status === 200, 'loop: hinge disarm lands')
+    ok((await post(`/api/room/${hera.pin}/draft`, ivan.workerToken, { script: { id: 'h2', verb: 'harvest', params: { rate: 2 } }, tier: 'cheap' })).status === 200, 'loop: a second draft stays un-played (it will carry into round 2)')
+    ok((await post(`/api/room/${hera.pin}/phase`, ivan.hingeToken, { to: 'intermission' })).status === 403, 'HTTP phase by a non-host → 403')
+    ok((await post(`/api/room/${hera.pin}/phase`, hera.hingeToken, { to: 'intermission' })).status === 200, 'host advances to intermission over HTTP')
+    ok((await post(`/api/room/${hera.pin}/phase`, hera.hingeToken, { to: 'round2' })).status === 200, 'host advances to round 2 over HTTP')
+    const oracleLoop = await post(`/api/room/${hera.pin}/oracle`, ivan.workerToken, { id: 'h2' })
+    const oracleLoopBody = await oracleLoop.json()
+    ok(oracleLoop.status === 200 && oracleLoopBody.report.ok && oracleLoopBody.report.prediction.length === 3, 'loop: round-2 oracle verdict + 3-tick dry-run over HTTP')
+    ok((await post(`/api/room/${hera.pin}/arm`, ivan.hingeToken, { id: 'h2' })).status === 200, 'loop: the verified arm lands')
+    const stEnd = await (await fetch(`${BASE}/api/room/${hera.pin}/state`, { headers: { authorization: `Bearer ${ivan.workerToken}` } })).json()
+    const h2end = stEnd.view.you.hand.find((sl: { script: { id: string } }) => sl.script.id === 'h2')
+    ok(h2end && h2end.armed === true && h2end.yolo === false && h2end.everGreen === true, 'FULL HTTP LIFECYCLE PROVEN: create → join → draft → oracle → arm → state, no websocket anywhere')
 
     // ── PRACTICE MODE: a second server with NO model wired ───────────────────
     // The env value is an UNINTERPOLATED compose literal — the exact string the

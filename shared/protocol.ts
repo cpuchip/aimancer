@@ -70,7 +70,7 @@ export type ClientMessage =
   | { type: 'draftRequest'; token: string; tier: DraftTier; order?: string } // either token — ask the apprentice (async)
   | { type: 'oracle'; token: string; id: string } // either token (verification is safe)
   | { type: 'arm'; token: string; id: string } // HINGE token ONLY
-  | { type: 'disarm'; token: string; id: string } // either token (disarming is safe)
+  | { type: 'disarm'; token: string; id: string } // HINGE token (script-lifecycle control, D4)
   | { type: 'scrap'; token: string; id: string } // either token (freeing a slot is safe)
   | { type: 'ping' }
 
