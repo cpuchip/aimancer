@@ -65,6 +65,7 @@ arm path, by design.
 
 | Route | Method | Token | Does |
 |---|---|---|---|
+| `/api/rules` | GET | — | the complete rules + this API as markdown — generated from `shared/rules.ts` (the `/wiki` page renders the same source). Public by design |
 | `/api/room` | POST | — | create a room; creator = host, seat 0. Optional `{name, tickMs, round1Ticks, round2Ticks}` presets (dev-fast from curl). Returns `{pin, seat, name, key, workerToken, hingeToken}` |
 | `/api/room/:pin/join` | POST | — | join by PIN: `{name?, key?}`. The same `key` reconnects to the SAME seat + tokens; omit it and one is minted and returned |
 | `/api/room/:pin/agent-prompt` | GET | **worker** | the ready-to-paste "connect your agent" text (single source of truth); never carries the hinge token |
@@ -101,8 +102,12 @@ prompts: one approval click per curl is the design.
   two-token seats: a **worker token** (AI: read/draft) and a **hinge token**
   (human: arm). `arm` is rejected server-side without the hinge token.
   `server/apprentice.ts` is the LLM I/O (env config + the chat call).
-- `src/` — Svelte 5 client: JOIN page (your hand, oracle/arm buttons) and
-  BOARD page (public world state + scoreboard).
+- `src/` — Svelte 5 client: JOIN page (your hand, oracle/arm buttons),
+  BOARD page (public world state + scoreboard), and the WIKI (`/wiki`).
+- `shared/rules.ts` — ONE source of truth for the rules: the complete game
+  reference generated from the live constants (never hardcoded numbers).
+  Serves three consumers: `/wiki` (humans), `GET /api/rules` (agents), and
+  `smoke.ts` (asserts the constants really made it into the text).
 
 MIT. Architecture adapted from the house siblings
 ([kernel-panic](https://github.com/cpuchip/kernel-panic),

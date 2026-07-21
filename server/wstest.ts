@@ -228,6 +228,15 @@ async function main(): Promise<void> {
     const version = await (await fetch(`${BASE}/version`)).text()
     ok(version.length > 0, `/version (${version})`)
 
+    // ── GET /api/rules: the public rules — one truth for humans AND agents ───
+    const rulesRes = await fetch(`${BASE}/api/rules`)
+    const rulesText = await rulesRes.text()
+    ok(rulesRes.status === 200 && (rulesRes.headers.get('content-type') ?? '').startsWith('text/plain'), 'GET /api/rules → 200 text/plain, NO auth required (rules are public)')
+    ok(rulesText.includes('| `harvest` |') && rulesText.includes('| `boost` |'), '/api/rules carries the verb table')
+    ok(rulesText.includes('/api/room/:pin/arm') && rulesText.includes('HTTP API quick reference'), '/api/rules carries the API quick reference')
+    ok(!/\b[wh]_[A-Za-z0-9]{6,}/.test(rulesText), '/api/rules carries no token material')
+    ok((await fetch(`${BASE}/api/rules`, { method: 'POST' })).status === 405, 'POST /api/rules → 405')
+
     // ── Room create + join ───────────────────────────────────────────────────
     const alice = new TestClient('key-alice', 'Alice')
     await alice.open('') // empty PIN = create
@@ -722,6 +731,7 @@ async function main(): Promise<void> {
     ok(ap.toLowerCase().includes('never bypass'), 'the paste-prompt forbids bypassing the agent\'s own permission prompts')
     ok(ap.includes('KEEP PLAYING') && ap.toLowerCase().includes('never faster than 3s'), 'the paste-prompt teaches the MONITORING loop (poll politely, react to change)')
     ok(ap.includes('lastRun') && ap.includes('"reveal": STOP'), 'monitoring covers per-script yield + the stop-at-reveal rule')
+    ok(ap.includes('/api/rules'), 'the paste-prompt points the agent at the full rules (curl /api/rules)')
     ok((await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt?token=${ivan.hingeToken}`)).status === 403, 'agent-prompt with a HINGE token → 403 (wrong surface to ask)')
     ok((await fetch(`${BASE}/api/room/${hera.pin}/agent-prompt`)).status === 401, 'agent-prompt with no token → 401')
 

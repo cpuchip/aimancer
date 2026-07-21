@@ -2,6 +2,7 @@
 // (the deploy oracle), hosts the authoritative rooms on a same-origin
 // WebSocket at /ws, AND exposes the FULL HTTP surface (the BYO-agent surface —
 // everything a seat can do over ws works over HTTP, room lifecycle included):
+//   GET  /api/rules                    — the complete rules, markdown, NO auth
 //   POST /api/room                     — create a room (creator = host, seat 0)
 //   POST /api/room/:pin/join          — join by PIN (reconnect-by-key honored)
 //   GET  /api/room/:pin/agent-prompt  — WORKER token: the ready-to-paste prompt
@@ -27,6 +28,7 @@ import { extname, join, normalize } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { mintKey, RoomRegistry, type Room } from './rooms.ts'
 import { buildAgentPrompt } from './agentPrompt.ts'
+import { rulesMarkdown } from '../shared/rules.ts'
 import { oracle } from '../shared/sim/oracle.ts'
 import type { DraftTier, Script, SimPhase } from '../shared/sim/types.ts'
 
@@ -98,7 +100,19 @@ function externalBase(req: IncomingMessage): string {
   return `${proto}://${host}`
 }
 
+// Pure and constant per process — compute once, serve forever.
+const RULES_MD = rulesMarkdown()
+
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  // GET /api/rules — the complete game reference (generated from balance.ts —
+  // the wiki's twin). PUBLIC by design: rules carry no room or token material.
+  if (url.pathname === '/api/rules') {
+    if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'GET only' })
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end(RULES_MD)
+    return
+  }
+
   // POST /api/room — create a room over HTTP (D4). The creator is seated as
   // host (seat 0) and gets BOTH tokens; optional body presets the room knobs
   // (dev-fast rooms stay possible from curl alone).

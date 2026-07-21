@@ -28,6 +28,8 @@ export function buildAgentPrompt(o: AgentPromptInput): string {
   const secs = Math.max(1, Math.round(o.tickMs / 1000))
   return `You are the AI apprentice for seat "${o.name}" in AIMANCER room ${o.pin} — a party game where you DRAFT automation scripts and only your human can ARM them, from their phone. You hold this seat's WORKER token; the hinge (arm) token stays on the human's phone, and your surface has no arm endpoint by design: you draft; your human arms on their phone. Play over plain HTTP with curl (the commands below are exact). Approve the curl when your agent asks — that's the point. Never bypass or auto-approve your own permission prompts to play faster.
 
+Full rules + API reference: curl -s ${base}/api/rules
+
 The script DSL — one JSON object per script (integer params; pick your own unique ids):
   {"id":"a1","verb":"harvest","params":{"rate":1..5}}   gather matter each tick
   {"id":"a2","verb":"refine","params":{"rate":1..3}}    3 matter -> 1 widget

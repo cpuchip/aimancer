@@ -208,6 +208,75 @@ button.advance-hot { animation: completePulse 1.4s infinite; font-size: var(--t-
 .lastrun.live { color: var(--ok-strong); }
 .lastrun.idle { color: var(--warn-strong); }
 
+/* landing teach block — supports the join, never competes with it */
+.teach {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--s-3) var(--s-4);
+  margin: var(--s-3) 0;
+  background: var(--surface);
+}
+.teach-steps { margin: 0; padding-left: var(--s-5); color: var(--ink-soft); }
+.teach-steps li { margin: var(--s-1) 0; }
+.teach-steps li::marker { color: var(--accent); font-weight: 700; }
+.teach-steps b { color: var(--ink); }
+.wiki-link { color: var(--accent); font-weight: 600; text-decoration: none; }
+.wiki-link:hover { text-decoration: underline; }
+
+/* ── WIKI (/wiki — the rules, rendered from shared/rules.ts) ─────────────── */
+#app:has(.wiki) { max-width: 860px; }
+.wiki a { color: var(--accent); }
+.wiki-head { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-4) 0 0; flex-wrap: wrap; }
+.wiki-emblem { width: 44px; height: 44px; filter: drop-shadow(0 2px 12px rgb(167 139 250 / 0.4)); }
+.wiki-head .wordmark { font-size: var(--t-xl); }
+.wiki-back { margin-left: auto; color: var(--ink-soft); text-decoration: none; font-size: var(--t-sm); }
+.wiki-back:hover { color: var(--accent); }
+.wiki-toc { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: var(--s-3) 0 var(--s-5); }
+.wiki-toc a {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  padding: var(--s-1) var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+.wiki-toc a:hover { color: var(--accent); border-color: var(--accent); }
+.wiki-section { scroll-margin-top: var(--s-4); margin-bottom: var(--s-6); }
+.wiki-section .wiki-h {
+  font-size: var(--t-lg);
+  text-transform: none;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--s-2);
+}
+.wiki-section .anchor { color: var(--ink-faint); text-decoration: none; opacity: 0; transition: opacity var(--quick); }
+.wiki-section .wiki-h:hover .anchor { opacity: 1; }
+.wiki-section p, .wiki-section li { color: var(--ink-soft); }
+.wiki-section b { color: var(--ink); }
+.wiki-section code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--raised);
+  border-radius: var(--r-sm);
+  padding: 1px var(--s-1);
+  color: var(--ink);
+}
+.mdcode {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  overflow-x: auto;
+  color: var(--ink);
+}
+.tblwrap { overflow-x: auto; margin: var(--s-3) 0; }
+.wiki-section td { color: var(--ink-soft); vertical-align: top; }
+.wiki-section td:first-child { white-space: nowrap; }
+
 /* board: agent liveness dot + lobby teach steps */
 .agent-dot { opacity: 0.18; filter: grayscale(1); margin-left: var(--s-1); }
 .agent-dot.live { opacity: 1; filter: none; }

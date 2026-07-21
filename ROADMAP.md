@@ -58,7 +58,18 @@ The build week (from the design doc, D1 = 2026-07-21):
       phone dyad line + board 🤖 dots; agent-prompt fetch excluded),
       **per-script `lastRun` yield** (sim-tracked, own-seat only — starved ≠
       dead; agents read it in /state) and the paste-prompt's KEEP PLAYING
-      monitoring section. Gates: smoke 203 · wstest 174.
+      monitoring section. Gates: smoke 203 · wstest 174. **★ HOTFIX 2 (fast
+      follow, same day): the WIKI + one source of truth for the rules.**
+      `shared/rules.ts` generates the complete reference (dyad/scoring/economy/
+      verbs+saturation/conditions/phases/oracle/gremlin/drafts/API) from
+      balance.ts + mpConfig.ts — numbers can never drift; smoke asserts the
+      constants landed in the text AND that the API section covers every
+      server route. Three surfaces: `/wiki` (client route + SPA-fallback
+      pathname, game-styled, per-section anchors), `GET /api/rules` (public
+      text/plain markdown for agents; paste-prompt gained the one curl line),
+      and the landing screen now TEACHES (pitch + 3 steps + goal + 📖 Full
+      rules) while joining stays the primary action; board lobby + how-to-play
+      link the wiki too. Gates: smoke 255 · wstest 180.
 
 ## D4 rulings + notes (for the D5 brief)
 

@@ -143,6 +143,7 @@
           {/each}
         </p>
       {/if}
+      <p class="faint">📖 full rules — <a href="/wiki" style="color:var(--accent)">{location.host}/wiki</a></p>
     </div>
   {:else if phase === 'reveal' && view.delta}
     <div class="delta-total">

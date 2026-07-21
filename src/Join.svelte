@@ -219,6 +219,7 @@
       <li><b>Watch your ⚡</b> (regen each tick) and the gremlin — patch when pressure climbs.</li>
     </ol>
     <p class="faint">The bet: cheap drafts are fast, often wrong (~{APPRENTICE_FLAW_CHEAP_PCT}%); smart is pricier, usually right (~{APPRENTICE_FLAW_SMART_PCT}% flawed). Cheap+verify vs smart+trust — that's the round-2 lesson.</p>
+    <p class="faint" style="margin-top:var(--s-2)"><a href="/wiki">📖 full wiki →</a></p>
   </details>
 {/snippet}
 
@@ -255,14 +256,25 @@
   <div class="hero">
     <img class="hero-emblem" src="/assets/emblem.png" alt="" />
     <h1 class="wordmark">AIMANCER</h1>
-    <p class="muted">Your AI apprentice drafts the scripts. Only YOU can arm them.</p>
+    <p class="muted">You + your AI are <b style="color:var(--ink)">one player</b>. It drafts the scripts — only you can arm them.</p>
   </div>
   <div class="card stack">
     <input placeholder="your name" bind:value={name} maxlength="16" autocomplete="off" />
     <input placeholder="room PIN (4 letters)" bind:value={pin} maxlength="4" style="text-transform:uppercase" autocomplete="off" />
     <button class="primary" onclick={() => connect(false)} disabled={!name || pin.length !== 4}>Join room</button>
     <button onclick={() => connect(true)} disabled={!name}>Create a room</button>
-    <p class="faint">Big screen: open <span class="mono">#/board/PIN</span> on the projector.</p>
+  </div>
+  <div class="teach">
+    <ol class="teach-steps">
+      <li><b>Join</b> with the room PIN above.</li>
+      <li><b>Copy the agent prompt</b> into your AI — or play solo with the practice apprentice.</li>
+      <li><b>Arm scripts, sell widgets</b> — and outlast the gremlin.</li>
+    </ol>
+    <p class="faint" style="margin:var(--s-2) 0 0">Goal: most points — widgets <b>sold</b> + uptime − waste, over two rounds: naive, then verified.</p>
+    <div class="row" style="justify-content:space-between; margin-top:var(--s-2)">
+      <a class="wiki-link" href="/wiki">📖 Full rules</a>
+      <span class="faint">Big screen: <span class="mono">#/board/PIN</span></span>
+    </div>
   </div>
   {@render howToPlay()}
 {:else}

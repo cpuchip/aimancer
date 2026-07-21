@@ -21,9 +21,11 @@ import {
   APPRENTICE_FLAW_CHEAP_PCT,
   APPRENTICE_FLAW_SMART_PCT,
   BOOST_BLOWUP_WASTE,
+  CORRUPT_THRESHOLD,
   DEAD_SCRIPT_WASTE,
   DRAFT_COST_CHEAP,
   DRAFT_COST_SMART,
+  GREMLIN_RAMP_TICKS,
   MARKET_MAX,
   MARKET_MIN,
   MAX_SCRIPTS,
@@ -35,13 +37,16 @@ import {
   TOKEN_CAP,
   TOKEN_REGEN,
   TOKEN_START,
+  VERB_PARAMS,
 } from './balance.ts'
 import { freshEvents, newFeedCursor } from '../eventFeed.ts'
+import { ROUND1_TICKS_DEFAULT, ROUND2_TICKS_DEFAULT } from '../mpConfig.ts'
+import { rulesMarkdown, rulesSections } from '../rules.ts'
 import { FLAW_CLASSES, flawScript, sampleScript } from './flaws.ts'
 import { oracle, staticCheck } from './oracle.ts'
 import { apply, computeDelta, newGame, RuleError, score, snap, stateHash, tick, ticksRemaining, ticksRunning, validateShape } from './sim.ts'
 import { pressureAt, stepMarket } from './world.ts'
-import { VERBS, type Command, type PhaseTicks, type Script, type SimEvent, type SimState } from './types.ts'
+import { CONDITION_FIELDS, CONDITION_OPS, VERBS, type Command, type PhaseTicks, type Script, type SimEvent, type SimState } from './types.ts'
 
 let passed = 0
 let failed = 0
@@ -990,6 +995,63 @@ console.log('per-script lastRun yield')
     return x
   }
   ok(snap(mk()) === snap(mk()), 'lastRun rides the snapshot deterministically (replay identity holds)')
+}
+
+// ── The rules — ONE source of truth (shared/rules.ts) ────────────────────────
+// The reference is GENERATED from balance.ts/mpConfig.ts; these assertions
+// prove the real constants made it into the text — if a number is retuned,
+// the wiki and /api/rules follow automatically and this stays green.
+console.log('rules — one source of truth')
+{
+  const sections = rulesSections()
+  const md = rulesMarkdown()
+  const ids = sections.map((sc) => sc.id)
+  ok(new Set(ids).size === ids.length && ids.length >= 9, `sections carry unique anchors (${ids.length} sections)`)
+  ok(sections.every((sc) => sc.body.trim().length > 100 && sc.title.length > 0), 'every section has a real title + body')
+  ok(!md.includes('undefined') && !md.includes('NaN') && !/\$\{/.test(md), 'no interpolation holes (undefined/NaN/${) in the text')
+
+  // the dyad + covenant line
+  ok(md.includes('your apprentice drafts · only a human arms'), 'the covenant line is in the rules')
+  ok(md.toLowerCase().includes('worker token') && md.toLowerCase().includes('hinge token'), 'the two-token split is taught')
+
+  // scoring + economy carry the LIVE constants
+  ok(md.includes(`× ${SCORE_PER_WIDGET}`) && md.includes(`× ${SCORE_WASTE_MULT}`), 'the scoring formula carries the live weights')
+  ok(md.includes(`Start ${TOKEN_START}, regen +${TOKEN_REGEN} per tick, cap ${TOKEN_CAP}`), 'the token economy line carries start/regen/cap')
+  ok(md.includes(`cheap draft ${DRAFT_COST_CHEAP}⚡`) && md.includes(`smart draft ${DRAFT_COST_SMART}⚡`) && md.includes(`oracle check ${ORACLE_COST}⚡`), 'every price comes from balance.ts')
+  ok(md.includes(`${APPRENTICE_FLAW_CHEAP_PCT}%`) && md.includes(`${APPRENTICE_FLAW_SMART_PCT}%`), 'both tier flaw rates are in the draft table')
+  ok(md.includes(`${MAX_SCRIPTS} scripts`), 'the hand cap is stated')
+
+  // the verb table: every verb, every param, every bound — straight from VERB_PARAMS
+  const verbsBody = sections.find((sc) => sc.id === 'verbs')!.body
+  for (const v of VERBS) ok(verbsBody.includes(`| \`${v}\` |`), `verb table row: ${v}`)
+  for (const [verb, specs] of Object.entries(VERB_PARAMS)) {
+    for (const sp of specs) ok(verbsBody.includes(`\`${sp.name}\` ${sp.min}..${sp.max}`), `bounds in the table: ${verb}.${sp.name} ${sp.min}..${sp.max}`)
+  }
+  ok(verbsBody.includes(`${REFINE_RATIO} matter per widget`) && verbsBody.includes('starved'), 'refine saturation (needs matter) is taught')
+  ok(verbsBody.includes('nothing to sell'), 'sell saturation (needs widgets) is taught')
+
+  // conditions: the full field + op sets
+  const condBody = sections.find((sc) => sc.id === 'conditions')!.body
+  for (const f of CONDITION_FIELDS) ok(condBody.includes(`\`${f}\``), `condition field listed: ${f}`)
+  for (const o of CONDITION_OPS) ok(condBody.includes(`\`${o}\``), `condition op listed: ${o}`)
+
+  // phases: round budgets + what changes per round
+  const phasesBody = sections.find((sc) => sc.id === 'phases')!.body
+  ok(phasesBody.includes(`| ${ROUND1_TICKS_DEFAULT} |`) && phasesBody.includes(`| ${ROUND2_TICKS_DEFAULT} |`), 'round tick budgets come from mpConfig')
+  ok(phasesBody.includes('DOES NOT EXIST') && md.includes('auto-renew'), 'round-1 no-oracle + round-2 auto-renew are taught')
+
+  // gremlin: the pressure/spike/corruption chain
+  const gremBody = sections.find((sc) => sc.id === 'gremlin')!.body
+  ok(gremBody.includes(`every ${GREMLIN_RAMP_TICKS} ticks`) && gremBody.includes(`≥ ${CORRUPT_THRESHOLD}`), 'gremlin ramp + corruption threshold carry the constants')
+  ok(gremBody.includes('attack surface'), 'YOLO-as-attack-surface is taught')
+
+  // the API quick reference covers EVERY server route (drift-catcher: add a
+  // route without documenting it and this fails)
+  const apiBody = sections.find((sc) => sc.id === 'api')!.body
+  const routes = ['state', 'draft', 'draft-request', 'oracle', 'arm', 'disarm', 'scrap', 'log', 'join', 'start', 'phase', 'hold', 'agent-prompt']
+  for (const r of routes) ok(apiBody.includes(`/api/room/:pin/${r}\``), `api reference covers /api/room/:pin/${r}`)
+  ok(apiBody.includes('`/api/room`') && apiBody.includes('`/api/rules`'), 'api reference covers create + the rules endpoint itself')
+  ok(!/\b[wh]_[A-Za-z0-9]{6,}/.test(md), 'the rules text carries no token-shaped material')
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)
