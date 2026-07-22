@@ -254,7 +254,12 @@ suites). Git history keeps them; the D1-D6 notes above are historical.
 
 ### Next (the polish day)
 
-- Storm/milestone/launch SFX + art pass (asset-harness).
+- Storm/milestone/launch SFX + art pass (asset-harness). **★ Lore asset pass
+  done (2026-07-22):** 14 lore-flavored assets in `public/assets/lore/`
+  (4 glyph medallions, 4 relics incl. an older/wilder Oracle's Eye origin
+  form, 3 figures incl. the Gremlin Mother, 3 epoch banners) — same brass/
+  indigo/violet style anchor as the shipped set, generated via
+  `generate_aimancer_lore.py` in the asset-harness clone.
 - Family playtest → balance pass on storm severity + vein cadence.
 - Board: wall-absorb animation beat + survivor arrivals visual.
 - loom-bots equivalent for the ark (drive 2-3 real agent seats).
