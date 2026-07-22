@@ -320,7 +320,9 @@ storm still prices its absence; the winners build their own gates.
     its blurb + thresholds from ORE_PER_PART (was hardcoded to 4; truth is 6);
     builder/quartermaster numbers derive from balance too; smoke pins it.
 
-Gates grew: smoke 158→208 · enginetest 29 · wstest 69→137 · liveproof 9→18.
+Gates grew: smoke 158→208 · enginetest 29 · wstest 69→141 · liveproof 9→16
+(liveproof 16 verified against PROD post-deploy, /version=26c87b4; first live
+probe room drew PIN PNNW — the clipped tongue in production).
 BREAKING (documented): unverified shared deploys now LAND (200, verified
 false) — the pre-freedom 409 is gone; `oracleResult` red no longer blocks
 shared actions at runtime (armor only). Additive: gate-policy/beta-run/
