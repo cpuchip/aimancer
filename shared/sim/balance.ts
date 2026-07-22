@@ -74,6 +74,19 @@ export const SURVIVOR_PERIOD = 20 // one may arrive every N ticks…
 export const SURVIVOR_FOOD_COST = 12 // …if the granary can feed them
 export const SURVIVORS_MAX = 10
 
+// ── The Mirror Yard (beta env — fork the world, rehearse a script) ──────────
+export const BETA_RUN_COST = 3 // one beta run (any tick count — the fork is the product)
+export const BETA_TICKS_MIN = 1
+export const BETA_TICKS_MAX = 10
+
+// ── The Chronicle (shared lore-memory — claims cost, discoveries are free) ──
+export const CHRONICLE_COST = 2 // posting a claim (anti-spam; discoveries free)
+export const CHRONICLE_TEXT_MAX = 500 // characters per entry
+export const CHRONICLE_EVIDENCE_MAX = 6 // evidence refs per entry
+export const CHRONICLE_EVIDENCE_LEN_MAX = 160 // characters per evidence ref
+export const CHRONICLE_RELATES_MAX = 6 // relates-to links per entry
+export const CHRONICLE_MAX_ENTRIES = 300 // the book is finite — write what matters
+
 // ── The launch (the climax — collective GO/NO-GO) ───────────────────────────
 /** GO votes must exceed half of ALL seated dyads (abstain ≠ GO), then the
  * HOST confirms with the launch command. Majority + host confirm, by design. */

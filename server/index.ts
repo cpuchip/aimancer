@@ -4,23 +4,36 @@
 // works over HTTP):
 //   GET  /api/rules                    — the complete rules, markdown, NO auth
 //   GET  /api/templates                — the Starlark template library, NO auth
+//   GET  /api/help[/:topic]            — help docs (documented topics public;
+//                                        the API holds more than the list admits)
 //   POST /api/room                     — create a settlement (creator = host, seat 0)
 //   POST /api/room/:pin/join          — DROP-IN join by PIN (reconnect-by-key honored)
 //   GET  /api/room/:pin/agent-prompt  — WORKER token: the ready-to-paste prompt
 //   GET  /api/room/:pin/state          — redacted per token (public without one)
 //   GET  /api/room/:pin/log            — command log + replay header (engine pinned)
-//   POST /api/room/:pin/deploy        — either token; scope='shared' runs THE GATE
-//                                        (engine dry-run — red ⇒ 409 + report)
+//   POST /api/room/:pin/deploy        — either token, either scope, DIRECT
+//                                        (FREEDOM UPDATE: the only deploy gate
+//                                        is the seat's OWN policy — 409 when
+//                                        YOUR gate blocks, report attached)
 //   POST /api/room/:pin/undeploy      — either token
 //   POST /api/room/:pin/oracle        — either token: paid verify (engine dry-run)
-//   POST /api/room/:pin/vote          — HINGE token ONLY (the human's voice)
+//   GET  /api/room/:pin/gate-policy   — your seat's policy (either token)
+//   PUT  /api/room/:pin/gate-policy   — HINGE only: the human sets the gates
+//   POST /api/room/:pin/beta-run      — either token: the MIRROR YARD (fork +
+//                                        rehearse N ticks, private report, ⚡)
+//   GET  /api/room/:pin/chronicle     — the shared lore-memory (public read)
+//   POST /api/room/:pin/chronicle     — either token: post a claim (⚡, deduped)
+//   POST /api/room/:pin/vote          — HINGE token ONLY (the human's voice;
+//                                        hinge CUSTODY is the player's choice)
 //   POST /api/room/:pin/launch        — HOST HINGE only (majority must stand)
+//   POST /api/room/:pin/end           — HOST HINGE only: call the game (end
+//                                        screen, then teardown after a grace)
 // Error shape everywhere: { ok:false, error } with 400 malformed · 401 no/bad
 // token · 403 wrong surface · 404 no room · 405 method · 409 the game said no
-// (including the deploy gate, which also carries `report`).
+// (including your own gate policy, which also carries `report`).
 // BREAKING vs the pre-pivot API (documented in ROADMAP.md): draft/arm/disarm/
 // scrap/prospect/claim-contract/start/phase/hold are GONE — the ark game has
-// deploy/undeploy/oracle/vote/launch instead.
+// deploy/undeploy/oracle/vote/launch/end instead.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { readFileSync, existsSync, readFile } from 'node:fs'
@@ -28,10 +41,20 @@ import { extname, join, normalize } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { mintKey, RoomRegistry, type Room } from './rooms.ts'
 import { buildAgentPrompt } from './agentPrompt.ts'
-import { rulesMarkdown } from '../shared/rules.ts'
+import { rulesMarkdown, rulesSections } from '../shared/rules.ts'
 import { TEMPLATES } from '../shared/templates.ts'
 import { engineHost } from './engine.ts'
+import { hiddenRegistry } from './registry.ts'
 import type { ScriptScope } from '../shared/sim/types.ts'
+
+/** How both tokens are labeled in every join/create response — a CLI-only
+ * player (no phone page) must know which is which: hinge-token CUSTODY is the
+ * player's choice; the ENDPOINT gating (vote/launch/end/gate-policy = hinge)
+ * is the structural minimum and never moves. */
+const TOKEN_ROLES = {
+  worker: "the agent's surface — state/deploy/oracle/beta-run/chronicle",
+  hinge: "the human's voice — the launch vote, gate policy, host end/launch (custody is yours to delegate at vote time)",
+} as const
 
 const PORT = Number(process.env.PORT ?? 8080)
 const DIST = join(process.cwd(), 'dist')
@@ -116,6 +139,45 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return
   }
 
+  // HELP — documented topics are public (the rules, per section). Hidden
+  // topics exist too; they answer only to a seat token in a room that has
+  // earned them, and an unearned topic is indistinguishable from an unknown
+  // one. The index lists ONLY the documented topics — deliberately.
+  const helpMatch = url.pathname.match(/^\/api\/help(?:\/([a-z0-9-]{1,40}))?$/)
+  if (helpMatch) {
+    if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'GET only' })
+    const topic = helpMatch[1]
+    if (!topic) {
+      sendJson(res, 200, { ok: true, topics: rulesSections().map((s) => ({ id: s.id, title: s.title })) })
+      return
+    }
+    const documented = rulesSections().find((s) => s.id === topic)
+    if (documented) {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end(`# ${documented.title}\n\n${documented.body}\n`)
+      return
+    }
+    // hidden: resolve the token to a seat in SOME live room (archaeology
+    // needs your settlement credentials)
+    const token = bearerToken(req, url)
+    if (token) {
+      for (const room of registry.all()) {
+        const who = room.auth(token)
+        if (!who) continue
+        room.touch()
+        const fragment = room.hiddenHelp(who.seat, topic)
+        if (fragment) {
+          res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end(fragment + '\n')
+          return
+        }
+        break
+      }
+    }
+    sendJson(res, 404, { ok: false, error: 'no help for that topic' })
+    return
+  }
+
   // POST /api/room — create a settlement; the creator is seated as HOST
   // (seat 0, the launch-confirm hinge) and gets BOTH tokens. The world is
   // live immediately — continuous play, no start step.
@@ -133,11 +195,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     if (!seated.ok) return sendJson(res, seated.code, { ok: false, error: seated.error })
     const seat = room.seats[seated.seat]
     room.touch()
-    sendJson(res, 200, { ok: true, pin: room.code, seat: seated.seat, name: seat.name, key: seat.key, workerToken: seat.workerToken, hingeToken: seat.hingeToken, tickMs: room.tickMs })
+    sendJson(res, 200, { ok: true, pin: room.code, seat: seated.seat, name: seat.name, key: seat.key, workerToken: seat.workerToken, hingeToken: seat.hingeToken, tokenRoles: TOKEN_ROLES, tickMs: room.tickMs })
     return
   }
 
-  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/(state|log|join|agent-prompt|deploy|undeploy|oracle|vote|launch)$/)
+  const m = url.pathname.match(/^\/api\/room\/([A-Za-z]{1,8})\/([a-z0-9-]{1,40})$/)
   if (!m) {
     sendJson(res, 404, { ok: false, error: 'unknown api route' })
     return
@@ -170,7 +232,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const seated = room.seatJoin(typeof body.name === 'string' ? body.name : '', key)
     if (!seated.ok) return sendJson(res, seated.code, { ok: false, error: seated.error })
     const seat = room.seats[seated.seat]
-    sendJson(res, 200, { ok: true, pin: room.code, seat: seated.seat, rejoined: seated.rejoined, name: seat.name, key: seat.key, workerToken: seat.workerToken, hingeToken: seat.hingeToken })
+    sendJson(res, 200, { ok: true, pin: room.code, seat: seated.seat, rejoined: seated.rejoined, name: seat.name, key: seat.key, workerToken: seat.workerToken, hingeToken: seat.hingeToken, tokenRoles: TOKEN_ROLES })
     return
   }
 
@@ -204,10 +266,57 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return
   }
 
+  // GATE POLICY: GET = your own policy (either token); PUT = hinge only
+  if (action === 'gate-policy') {
+    if (req.method === 'GET') {
+      const r = room.gatePolicyFor(token)
+      if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
+      return sendJson(res, 200, { ok: true, seat: r.seat, policy: r.policy })
+    }
+    if (req.method === 'PUT') {
+      let body: unknown
+      try {
+        body = JSON.parse((await readBody(req)) || '{}')
+      } catch {
+        return sendJson(res, 400, { ok: false, error: 'invalid JSON body' })
+      }
+      const r = room.trySetGatePolicy(token, body)
+      if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
+      return sendJson(res, 200, { ok: true, policy: r.policy })
+    }
+    return sendJson(res, 405, { ok: false, error: 'GET or PUT' })
+  }
+
+  // CHRONICLE read: public — the settlement's shared memory
+  if (action === 'chronicle' && req.method === 'GET') {
+    const entries = room.chronicleEntries({
+      author: url.searchParams.get('author') ?? undefined,
+      q: url.searchParams.get('q') ?? undefined,
+      limit: Number(url.searchParams.get('limit')) || undefined,
+    })
+    return sendJson(res, 200, { ok: true, count: room.sim.chronicle.length, entries })
+  }
+
+  // Anything not on the documented surface: perhaps the API holds more than
+  // the docs admit (hidden endpoints answer a seat token in a room that has
+  // earned them) — else an honest 404.
+  const KNOWN_ACTIONS = new Set(['state', 'log', 'join', 'agent-prompt', 'deploy', 'undeploy', 'oracle', 'gate-policy', 'beta-run', 'chronicle', 'vote', 'launch', 'end'])
+  if (!KNOWN_ACTIONS.has(action)) {
+    if (req.method === 'GET' && who) {
+      const fragment = room.hiddenEndpoint(who.seat, action)
+      if (fragment) {
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(fragment + '\n')
+        return
+      }
+    }
+    return sendJson(res, 404, { ok: false, error: 'unknown api route' })
+  }
+
   if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' })
   if (!who) return sendJson(res, 401, { ok: false, error: 'missing or unknown token' })
 
-  let body: { id?: string; name?: string; source?: string; scope?: string; go?: boolean }
+  let body: { id?: string; name?: string; source?: string; scope?: string; go?: boolean; script?: string; ticks?: number; text?: string; evidence?: unknown; relatesTo?: unknown }
   try {
     body = JSON.parse((await readBody(req)) || '{}')
   } catch {
@@ -216,8 +325,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   }
 
   if (action === 'deploy') {
-    // district scope: your branch, lands immediately (YOLO allowed).
-    // shared scope: THE DEPLOY GATE — engine dry-run must be green or 409.
+    // DIRECT deploy, either scope (FREEDOM UPDATE) — the only gate is the
+    // seat's OWN policy; a policy block is a 409 with the spoken reason.
     if (typeof body.source !== 'string') return sendJson(res, 400, { ok: false, error: 'missing source' })
     const r = await room.tryDeploy(token, body.id, body.name ?? '', body.source, (body.scope ?? 'district') as ScriptScope)
     if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error, ...(r.report ? { report: r.report } : {}) })
@@ -241,6 +350,23 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return
   }
 
+  // THE MIRROR YARD: fork + rehearse, private report, ⚡ from the balance
+  if (action === 'beta-run') {
+    const source = typeof body.script === 'string' ? body.script : typeof body.source === 'string' ? body.source : ''
+    const r = await room.tryBetaRun(token, source, (body.scope ?? 'district') as ScriptScope, body.ticks)
+    if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
+    sendJson(res, 200, { ok: true, report: r.report })
+    return
+  }
+
+  // THE CHRONICLE: post a claim (either token — the dyad speaks together)
+  if (action === 'chronicle') {
+    const r = room.tryChronicle(token, body.text, body.evidence, body.relatesTo)
+    if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
+    sendJson(res, 200, { ok: true, id: r.id })
+    return
+  }
+
   if (action === 'vote') {
     if (typeof body.go !== 'boolean') return sendJson(res, 400, { ok: false, error: 'missing go (boolean)' })
     const r = room.tryVote(token, body.go)
@@ -251,6 +377,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
 
   if (action === 'launch') {
     const r = room.tryLaunch(token)
+    if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
+    sendJson(res, 200, { ok: true })
+    return
+  }
+
+  // HOST END: call the game (anti-immortal-rooms — teardown after the grace)
+  if (action === 'end') {
+    const r = room.tryEnd(token)
     if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
     sendJson(res, 200, { ok: true })
     return
@@ -305,10 +439,13 @@ setInterval(() => {
 }, 100)
 
 const EMPTY_TTL_MS = Number(process.env.EMPTY_TTL_MS) || 30 * 60_000
-setInterval(() => registry.sweep(Date.now(), EMPTY_TTL_MS), 30_000)
+const SWEEP_INTERVAL_MS = Number(process.env.SWEEP_INTERVAL_MS) || 30_000
+setInterval(() => registry.sweep(Date.now(), EMPTY_TTL_MS), SWEEP_INTERVAL_MS)
 
 server.listen(PORT, () => {
   console.log(`aimancer server on :${PORT} (version ${VERSION}) — http + ws (/ws) + api (/api)`)
+  const lore = hiddenRegistry()
+  console.log(`[lore] hidden surfaces: ${lore.surfaces.length} (${lore.source})`)
   // warm the engine subprocess and pin its identity for replay headers
   void engineHost()
     .warm()

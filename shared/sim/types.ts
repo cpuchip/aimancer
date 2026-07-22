@@ -144,6 +144,26 @@ export interface StormSpec {
   severity: number
 }
 
+// ── The Chronicle (FREEDOM UPDATE — shared lore-memory, replay data) ────────
+
+/** One entry in the settlement's shared chronicle. Claims are posted by a
+ * seat (worker or hinge — the dyad speaks with one voice here) and cost ⚡;
+ * discoveries are auto-entered free when a hidden surface is first found.
+ * The chronicle is a LOGGED COMMAND, so replays carry the collective
+ * knowledge-building — the lore is part of the record. */
+export interface ChronicleEntry {
+  id: number // 1-based, append-order (entries are never removed)
+  author: number // seat index
+  kind: 'claim' | 'discovery'
+  text: string
+  /** Evidence refs — free-form pointers ("tick 41 log", "/api/help/x", a
+   * script id). The chronicle doesn't verify them; readers do. */
+  evidence: string[]
+  /** Ids of earlier entries this one builds on / disputes / completes. */
+  relatesTo: number[]
+  atTick: number
+}
+
 // ── End screen (after the launch) ───────────────────────────────────────────
 
 export interface DyadEndStats {
@@ -179,8 +199,13 @@ export interface SimState {
   granaryFood: number
   /** Survivors sheltering — each raises the room's script capacity. */
   survivors: number
+  /** The game-over latch: true after the LAUNCH or a host END — the world
+   * rests, the books open. `endedEarly` says which story it was. */
   launched: boolean
+  endedEarly: boolean
   end: EndStats | null
+  /** The shared chronicle — collective lore-memory, append-only, replayed. */
+  chronicle: ChronicleEntry[]
   events: SimEvent[] // this tick's public happenings (cleared each tick)
   eventSeq: number
 }
@@ -204,6 +229,11 @@ export type SimEvent =
   | { t: 'veinExhausted'; id: number }
   | { t: 'voteCast'; dyad: number; go: boolean }
   | { t: 'launch'; goVotes: number; dyads: number }
+  | { t: 'ended' } // the host called the game — no launch, the books open
+  // The chronicle speaks: a claim posted, or a hidden surface FIRST found
+  // (kind 'discovery' — the board celebrates it). snippet keeps the feed
+  // self-contained (the full entry lives in state.chronicle by id).
+  | { t: 'chronicle'; dyad: number; id: number; kind: 'claim' | 'discovery'; snippet: string }
 
 // ── Commands (the log; sim = f(seed + commands)) ────────────────────────────
 
@@ -211,9 +241,10 @@ export type Command =
   // Drop-in: a dyad claims the next district. Logged — replays reproduce the
   // exact join order and timing.
   | { t: 'joinDistrict'; name: string }
-  // Deploy carries the SOURCE as data plus the server's gate result: for
-  // scope='shared' the server ran the real oracle (engine dry-run + static
-  // checks) BEFORE logging; verified + verdict are that result, as data.
+  // Deploy carries the SOURCE as data. FREEDOM UPDATE: the server imposes NO
+  // verification requirement — any scope deploys directly. verified + verdict
+  // are data from an oracle run the server performed when the SEAT'S OWN gate
+  // policy asked for one (or false/absent when it didn't).
   | { t: 'deploy'; player?: number; id: string; name: string; source: string; scope: ScriptScope; verified: boolean; verdict?: Verdict }
   | { t: 'undeploy'; player?: number; id: string }
   // The paid oracle check on a deployed script: the server ran the engine
@@ -225,3 +256,15 @@ export type Command =
   | { t: 'scriptTick'; player?: number; id: string; actions: Action[]; gasUsed: number; err?: string; starved?: boolean; logs?: string[] }
   | { t: 'vote'; player?: number; go: boolean } // hinge-only (server-enforced)
   | { t: 'launch' } // host act — refused until ark complete + majority GO
+  // HOST END (anti-immortal-rooms): the host calls the game — the world rests,
+  // end stats are captured as they stand, the books open. Server-enforced
+  // host-hinge; the room tears down after a short reading grace.
+  | { t: 'end' }
+  // FREEDOM UPDATE. spend: a ⚡ debit for a server-side service (beta runs).
+  // The SERVICE is a query and stays out of the log; the ECONOMY is sim state
+  // and must replay — so the debit alone is logged.
+  | { t: 'spend'; player?: number; amount: number; reason: string }
+  // chronicle: append to the shared lore-memory. Costs CHRONICLE_COST unless
+  // free (discovery auto-entries). Exact-duplicate text is refused (novelty
+  // dedupe); relatesTo must reference existing entries.
+  | { t: 'chronicle'; player?: number; kind?: 'claim' | 'discovery'; text: string; evidence?: string[]; relatesTo?: number[]; free?: boolean }

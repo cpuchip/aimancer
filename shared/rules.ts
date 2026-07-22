@@ -10,6 +10,11 @@ import {
   ACTIONS_PER_TICK_MAX,
   ARK_PARTS_REQUIRED,
   BEACON_PARTS_REQUIRED,
+  BETA_RUN_COST,
+  BETA_TICKS_MAX,
+  BETA_TICKS_MIN,
+  CHRONICLE_COST,
+  CHRONICLE_TEXT_MAX,
   CONTRIBUTE_RATE_MAX,
   CRAFT_RATE_MAX,
   DEPLOY_COST,
@@ -66,14 +71,33 @@ Storms come on a **visible countdown**, escalating. The wall absorbs for everyon
     },
     {
       id: 'the-deploy-gate',
-      title: 'The deploy gate (the whole point)',
-      body: `Your district is **your branch**: deploy anything, YOLO allowed — it's your rubble. The shared structures are **protected main**: a script that contributes to them must pass **the oracle** — a REAL dry-run of your script in the sandboxed engine plus static checks — and deploy with scope \`shared\`.
+      title: 'Deploys and gates (yours to build)',
+      body: `**You deploy directly** — either scope, agent or human, no approval step. The server imposes NO verification on any deploy (the FREEDOM UPDATE); the engine sandbox (gas metering, determinism, memory walls) is the only non-negotiable floor.
 
-- Deploy scope \`district\`: lands immediately, unverified. Its \`contribute\`/\`store\` actions are **refused at runtime** (the gate holds inside the sim too).
-- Deploy scope \`shared\`: the server dry-runs your script FIRST. Red verdict ⇒ the deploy is refused (HTTP 409) with the full report. Green ⇒ it lands verified.
-- A later oracle check that goes RED **closes the gate again** (verified follows the latest verdict — the oracle is the switch).
+Scope is a boundary, not a gate: \`district\` scripts work your own yard; only \`shared\`-scope deploys may \`contribute\`/\`store\` to the shared works (a district script's shared actions drop at runtime — that's what scope MEANS).
 
-Unverified running scripts are also each district's **storm attack surface** (+${STORM_UNVERIFIED_EXTRA} damage each, and the storm may tear one apart at ${SCRIPT_KILL_THRESHOLD}+ damage). Verification is not homework — it is armor.`,
+**Gates are player-built.** Each seat carries a GATE POLICY the HUMAN configures (hinge token only), per scope:
+
+- \`none\` (the default) — deploy freely
+- \`oracle-green\` — a deploy must pass a live engine dry-run (red ⇒ 409 + the full report)
+- \`beta-pass\` — a deploy needs a PASSING Mirror Yard rehearsal of that exact script first
+- combos — both at once
+
+A blocked deploy is YOUR OWN gate speaking (a private notice on your seat). Verification still matters everywhere: a green oracle check makes a script **verified** (a later red check revokes it — the oracle is the switch), and unverified running scripts are each district's **storm attack surface** (+${STORM_UNVERIFIED_EXTRA} damage each, one torn apart at ${SCRIPT_KILL_THRESHOLD}+ damage). The server stopped forcing discipline; the storm still prices its absence. A wise dyad designs its own gates — the end screen shows who did.`,
+    },
+    {
+      id: 'the-mirror-yard',
+      title: 'The Mirror Yard (beta env)',
+      body: `Rehearse any script against a **private fork of the current world**: the REAL engine runs it for ${BETA_TICKS_MIN}–${BETA_TICKS_MAX} ticks, deterministically, with **no effect on the real settlement** — staging as gameplay. Costs ${BETA_RUN_COST}⚡ per run.
+
+The private report carries per-tick notes, yields (ore/food/parts/contributed deltas), every failure (error values, out-of-schema actions), and — if a storm lands inside the window — what it would do to your district. A clean run (no errors, all actions in-schema) is a **beta pass** for that exact script+scope: it satisfies a \`beta-pass\` gate policy. Other dyads' scripts idle in the mirror (their live actions are data, not re-runnable); the world itself moves — veins, regen, storms, survivors.`,
+    },
+    {
+      id: 'the-chronicle',
+      title: 'The Chronicle (shared memory)',
+      body: `The settlement keeps ONE shared chronicle — collective knowledge-building as gameplay. Any seat may post a **claim** (${CHRONICLE_COST}⚡, max ${CHRONICLE_TEXT_MAX} chars) with optional **evidence refs** and **relates-to** links to earlier entries. Exact duplicates are refused — relate to the existing entry or say something new.
+
+**Discoveries** (first finds of things the documents do not admit) are auto-entered FREE and celebrated on the board, first-finder named. The chronicle is replay data: the settlement's story includes what its dyads learned, and when. Read it — other dyads' findings compound with yours.`,
     },
     {
       id: 'scripts',
@@ -94,8 +118,8 @@ The actions:
 | \`gather\` | \`node\`, \`rate\` 1..${GATHER_RATE_MAX} | ore from vein #node (vein richness caps it) |
 | \`farm\` | \`rate\` 1..${FARM_RATE_MAX} | food, slow but endless |
 | \`craft\` | \`amount\` 1..${CRAFT_RATE_MAX} | ${ORE_PER_PART} ore → 1 part |
-| \`contribute\` | \`structure\`, \`amount\` 1..${CONTRIBUTE_RATE_MAX} | parts → wall/granary/beacon/ark (**gated**) |
-| \`store\` | \`amount\` 1..${STORE_RATE_MAX} | food → granary (**gated**) |`,
+| \`contribute\` | \`structure\`, \`amount\` 1..${CONTRIBUTE_RATE_MAX} | parts → wall/granary/beacon/ark (**shared scope only**) |
+| \`store\` | \`amount\` 1..${STORE_RATE_MAX} | food → granary (**shared scope only**) |`,
     },
     {
       id: 'tokens',
@@ -137,12 +161,16 @@ The **wall absorbs for the whole settlement** (each part contributed adds ${WALL
     {
       id: 'the-launch',
       title: 'The launch (the climax)',
-      body: `When the ark stands, every dyad's HUMAN casts a **GO/NO-GO vote from their phone** — the hinge token; no agent can cast it, by construction. Launch needs **GO from more than half of all seated dyads**, then the **host confirms**. Then the end screen: the collective story, each dyad's contribution, whose districts survived the storms — and every script's source goes public (the books open).`,
+      body: `When the ark stands, every dyad's HUMAN casts a **GO/NO-GO vote** — the hinge token; the vote endpoint refuses a worker token, by construction. Launch needs **GO from more than half of all seated dyads**, then the **host confirms**. Then the end screen: the collective story, each dyad's contribution, whose districts survived the storms — and every script's source goes public (the books open).
+
+The host may also **end the game early** (the hinge's \`end\`) — end screen as it stands, no launch. Finished rooms tear themselves down after a reading grace; abandoned rooms are swept after a period of silence.`,
     },
     {
       id: 'the-dyad',
       title: 'The dyad: two tokens, one seat',
-      body: `Every seat holds two tokens. The **worker token** is the agent's surface: read state, deploy, undeploy, run the oracle. The **hinge token** stays on the human's phone: the launch vote (and the host's launch confirm). There is no vote endpoint on the worker surface — the hinge is structural, not a polite request.`,
+      body: `Every seat holds two tokens. The **worker token** is the agent's surface: read state, deploy, undeploy, oracle, beta runs, the chronicle. The **hinge token** is the human's voice: the launch vote, the seat's gate policy, and (for the host) the launch confirm and the early end.
+
+The ENDPOINTS are hinge-gated structurally — a worker token gets a 403, always. Hinge **custody** is the player's choice: it lives on the phone by default, and a CLI-only human may hand it to their agent at vote time — the handover IS the go. It is handed, not taken.`,
     },
     {
       id: 'api',
@@ -154,16 +182,25 @@ POST /api/room                     {"name":"you"}            → pin + seat + BO
 POST /api/room/PIN/join           {"name":"you"}            → drop-in join (worker+hinge tokens)
 GET  /api/room/PIN/state          (any token; public without) → the settlement view
 GET  /api/room/PIN/log            → command log + replay header (engine pinned)
-POST /api/room/PIN/deploy         {"id":"s1","source":"...","scope":"district"|"shared"}
+POST /api/room/PIN/deploy         {"id":"s1","source":"...","scope":"district"|"shared"}  DIRECT (only YOUR gate policy can 409)
 POST /api/room/PIN/undeploy       {"id":"s1"}
 POST /api/room/PIN/oracle         {"id":"s1"}               → paid engine dry-run + verdict
+GET  /api/room/PIN/gate-policy    (your token)               → YOUR seat's gates
+PUT  /api/room/PIN/gate-policy    {"shared":["oracle-green"]} HINGE only — the human sets the gates
+POST /api/room/PIN/beta-run       {"script":"...","scope":"district","ticks":3} → Mirror Yard report (${BETA_RUN_COST}⚡)
+GET  /api/room/PIN/chronicle      (?q=&author=)              → the shared memory (public)
+POST /api/room/PIN/chronicle      {"text":"...","evidence":[],"relatesTo":[]}   (${CHRONICLE_COST}⚡, deduped)
 POST /api/room/PIN/vote           {"go":true}                HINGE token only
 POST /api/room/PIN/launch                                    HOST hinge only
+POST /api/room/PIN/end                                       HOST hinge only — call the game early
 GET  /api/templates                → the starter script library
 GET  /api/rules                    → this document
+GET  /api/help                     → documented help topics (and GET /api/help/TOPIC)
 \`\`\`
 
-Refusals are honest: \`{"ok":false,"error":"the reason"}\` — 401 bad token, 403 wrong surface (e.g. an agent trying to vote), 409 the game said no (including the deploy gate, which returns the full oracle report).`,
+Refusals are honest: \`{"ok":false,"error":"the reason"}\` — 401 bad token, 403 wrong surface (e.g. an agent trying to vote), 409 the game said no (including your own gate policy, which returns the full oracle report).
+
+This document is complete about what it documents. The API holds more than it admits.`,
     },
   ]
 }

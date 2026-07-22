@@ -25,9 +25,9 @@ function ok(cond: boolean, name: string): void {
   }
 }
 
-async function api(path: string, opts: { token?: string; body?: unknown } = {}): Promise<{ status: number; json: Record<string, unknown> }> {
+async function api(path: string, opts: { token?: string; body?: unknown; method?: string } = {}): Promise<{ status: number; json: Record<string, unknown> }> {
   const res = await fetch(`${BASE}${path}`, {
-    method: opts.body !== undefined ? 'POST' : 'GET',
+    method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
     headers: {
       ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
       ...(opts.body !== undefined ? { 'content-type': 'application/json' } : {}),
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   console.log(`  /version = ${await (await fetch(`${BASE}/version`)).text()}`)
 
   const rules = await (await fetch(`${BASE}/api/rules`)).text()
-  ok(rules.includes('deploy gate'), '/api/rules serves the ark game')
+  ok(rules.includes('You deploy directly') && rules.includes('Mirror Yard'), '/api/rules serves the FREEDOM ark game')
 
   // create a fast probe room (1s ticks) and deploy the miner template
   const created = await api('/api/room', { body: { name: 'liveproof', tickMs: 1000 } })
@@ -57,9 +57,28 @@ async function main(): Promise<void> {
   const dep = await api(`/api/room/${pin}/deploy`, { token: worker, body: { id: 'probe', scope: 'district', source: miner.source } })
   ok(dep.status === 200, 'template deployed over HTTP')
 
-  // THE GATE, live: a red shared deploy must 409
+  // FREEDOM, live: a shared deploy is DIRECT under the default policy…
+  const direct = await api(`/api/room/${pin}/deploy`, { token: worker, body: { id: 'red', scope: 'shared', source: 'act("blastoff")' } })
+  ok(direct.status === 200 && direct.json['verified'] === false, 'FREEDOM live: shared deploy lands direct + unverified (no server gate)')
+  await api(`/api/room/${pin}/undeploy`, { token: worker, body: { id: 'red' } })
+  // …until the HUMAN builds a gate (hinge PUT), which then blocks a red script
+  ok((await api(`/api/room/${pin}/gate-policy`, { method: 'PUT', token: hinge, body: { shared: ['oracle-green'] } })).status === 200, 'gate-policy set live (hinge)')
   const gate = await api(`/api/room/${pin}/deploy`, { token: worker, body: { id: 'red', scope: 'shared', source: 'act("blastoff")' } })
-  ok(gate.status === 409, 'deploy gate live: red shared deploy → 409')
+  ok(gate.status === 409, 'YOUR GATE live: red shared deploy → 409 once the human set oracle-green')
+
+  // the MIRROR YARD, live: rehearse against a fork of the real world
+  const beta = await api(`/api/room/${pin}/beta-run`, { token: worker, body: { script: 'act("farm", rate=2)', scope: 'district', ticks: 2 } })
+  ok(beta.status === 200 && (beta.json['report'] as { ok: boolean }).ok === true, 'MIRROR YARD live: beta run returns a clean report')
+
+  // the CHRONICLE, live: post + public read
+  const post = await api(`/api/room/${pin}/chronicle`, { token: worker, body: { text: 'liveproof was here', evidence: ['this probe'] } })
+  ok(post.status === 200, 'CHRONICLE live: claim posted')
+  const readBack = await api(`/api/room/${pin}/chronicle`)
+  ok(readBack.status === 200 && (readBack.json['entries'] as unknown[]).length >= 1, 'CHRONICLE live: public read returns the entry')
+
+  // hidden surfaces, live: a hidden help topic answers a seat token
+  const hidden = await fetch(`${BASE}/api/help/aimancer?token=${worker}`)
+  ok(hidden.status === 200, 'HIDDEN SURFACE live: a hidden help topic answers a seat token')
 
   // the vote hinge split, live
   ok((await api(`/api/room/${pin}/vote`, { token: worker, body: { go: true } })).status === 403, 'vote with worker token → 403 (hinge is structural, live)')
@@ -82,6 +101,10 @@ async function main(): Promise<void> {
     console.log(`  tick ${mined.tick}: ore=${mined.dyads[0].ore} lastTick="${sc.lastTick?.note}" gas=${sc.lastTick?.gasUsed} engine=${mined.engine?.version}`)
     ok(mined.engine !== null, 'engine identity pinned in the live view')
   }
+
+  // leave the site clean: the host calls the game (also proves /end live —
+  // the room self-terminates after the reading grace instead of squatting)
+  ok((await api(`/api/room/${pin}/end`, { token: hinge, body: {} })).status === 200, 'HOST END live: the probe settlement is called (self-terminates after the grace)')
 
   console.log(failed === 0 ? `LIVEPROOF OK — ${passed} assertions` : `LIVEPROOF FAILED — ${failed} failures (${passed} passed)`)
   process.exit(failed === 0 ? 0 : 1)

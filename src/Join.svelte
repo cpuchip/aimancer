@@ -7,7 +7,8 @@
   import { clientKey, wsUrl } from './net.ts'
   import { TEMPLATES } from '../shared/templates.ts'
   import { MILESTONE_ORDER } from '../shared/sim/types.ts'
-  import type { RoomView, ServerMessage } from '../shared/protocol.ts'
+  import type { GatePolicy, GateRequirement } from '../shared/gatePolicy.ts'
+  import type { BetaReport, RoomView, ServerMessage } from '../shared/protocol.ts'
   import { fmtClock, scopeBadge, statusIcon, stormUrgency, STRUCTURE_ICON, STRUCTURE_LABEL } from './ui.ts'
 
   let pin = $state('')
@@ -29,7 +30,14 @@
   let templateId = $state(TEMPLATES[0].id)
   let deployBusy = $state(false)
   let gateReport = $state<string[] | null>(null)
+  let betaBusy = $state(false)
+  let betaTicks = $state(3)
+  let betaReport = $state<BetaReport | null>(null)
+  let chronText = $state('')
   let serial = 1
+
+  const GATE_SCOPES: Array<'district' | 'shared'> = ['shared', 'district']
+  const GATE_REQS: GateRequirement[] = ['oracle-green', 'beta-pass']
 
   let ws: WebSocket | null = null
 
@@ -66,9 +74,9 @@
     }
   }
 
-  async function api(path: string, token: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+  async function api(path: string, token: string, body: unknown, method = 'POST'): Promise<{ status: number; json: Record<string, unknown> }> {
     const res = await fetch(`/api/room/${roomPin}/${path}`, {
-      method: 'POST',
+      method,
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-aimancer-phone': '1' },
       body: JSON.stringify(body),
     })
@@ -91,12 +99,48 @@
     const r = await api('deploy', workerToken, { id: `p${serial++}x${Date.now() % 1000}`, name: scriptName, source, scope })
     deployBusy = false
     if (r.status === 200) {
-      say(scope === 'shared' ? '🟢 deployed VERIFIED through the gate' : 'deployed to your district')
+      const verified = r.json['verified'] === true
+      say(scope === 'shared' ? (verified ? '🟢 deployed to the SHARED works (verified by your gate)' : 'deployed to the SHARED works — unverified (storm bait until you verify)') : 'deployed to your district')
     } else {
       const rep = r.json['report'] as { reasons?: string[] } | undefined
       gateReport = rep?.reasons ?? [String(r.json['error'] ?? 'refused')]
       say(String(r.json['error'] ?? 'refused'))
     }
+  }
+
+  async function betaRun(): Promise<void> {
+    betaBusy = true
+    betaReport = null
+    const r = await api('beta-run', workerToken, { script: source, scope, ticks: betaTicks })
+    betaBusy = false
+    if (r.status !== 200) return say(String(r.json['error'] ?? 'the yard refused'))
+    betaReport = r.json['report'] as BetaReport
+    say(betaReport.ok ? '🪞 beta PASS — this exact script satisfies a beta-pass gate' : '🪞 beta FAILED — read the mirror')
+  }
+
+  async function setGate(gscope: 'district' | 'shared', req: GateRequirement, on: boolean): Promise<void> {
+    const cur: GatePolicy = view?.you?.gatePolicy ?? { district: [], shared: [] }
+    const next: GatePolicy = { district: [...cur.district], shared: [...cur.shared] }
+    if (on && !next[gscope].includes(req)) next[gscope] = [...next[gscope], req]
+    if (!on) next[gscope] = next[gscope].filter((x) => x !== req)
+    const r = await api('gate-policy', hingeToken, next, 'PUT')
+    say(r.status === 200 ? `your ${gscope} gate: ${(r.json['policy'] as GatePolicy)[gscope].join(' + ') || 'none'}` : String(r.json['error']))
+  }
+
+  async function postChronicle(): Promise<void> {
+    const text = chronText.trim()
+    if (!text) return
+    const r = await api('chronicle', workerToken, { text })
+    if (r.status === 200) {
+      chronText = ''
+      say('📜 posted to the chronicle')
+    } else say(String(r.json['error']))
+  }
+
+  async function endGame(): Promise<void> {
+    if (!confirm('End the game for everyone? The end screen shows as it stands, then the settlement closes.')) return
+    const r = await api('end', hingeToken, {})
+    if (r.status !== 200) say(String(r.json['error']))
   }
 
   async function oracleCheck(id: string): Promise<void> {
@@ -159,8 +203,8 @@
 {:else if view && view.launched && view.end}
   <div class="stack" style="padding:var(--s-4); max-width:560px; margin:0 auto">
     <div class="phase-banner phase-reveal">
-      <span class="title">🚀 THE ARK HAS LAUNCHED</span>
-      <span class="sub">{view.end.goVotes} GO of {view.end.dyads.length} dyads · tick {view.end.launchedAtTick} · {view.end.stormsWeathered} storms weathered · {view.end.survivors} survivors aboard</span>
+      <span class="title">{view.endedEarly ? '🌙 THE HOST CALLED IT' : '🚀 THE ARK HAS LAUNCHED'}</span>
+      <span class="sub">{view.endedEarly ? `the settlement rests at tick ${view.end.launchedAtTick}` : `${view.end.goVotes} GO of ${view.end.dyads.length} dyads · tick ${view.end.launchedAtTick}`} · {view.end.stormsWeathered} storms weathered · {view.end.survivors} survivors {view.endedEarly ? 'sheltering' : 'aboard'}</span>
     </div>
     <table>
       <thead><tr><th>district</th><th class="r">parts given</th><th class="r">storm dmg</th><th class="r">verified</th><th>stood?</th></tr></thead>
@@ -234,6 +278,16 @@
 
     {#if toast}<div class="hint">{toast}</div>{/if}
 
+    <!-- PRIVATE NOTICES (your gates speaking, lore answering) -->
+    {#if view.you && view.you.notices.length > 0}
+      <div class="card stack" style="gap:var(--s-1)">
+        <b>📩 Your seat's notices</b>
+        {#each view.you.notices.slice(0, 4) as n, ni (ni)}
+          <div class="faint">{n.kind === 'gate-blocked' ? '🚧' : n.kind === 'gate-set' ? '⚙️' : n.kind === 'lore' ? '🗝' : '🪞'} {n.text}</div>
+        {/each}
+      </div>
+    {/if}
+
     <!-- YOUR SCRIPTS -->
     <h2 style="margin:var(--s-2) 0 0">Your scripts <span class="muted num">({runningCount}/{view.scriptSlots} slots)</span></h2>
     {#each myScripts as sc (sc.id)}
@@ -270,27 +324,89 @@
       <input bind:value={scriptName} placeholder="script name" maxlength="24" />
       <textarea bind:value={source} rows="8" spellcheck="false"></textarea>
       <div class="row" style="gap:var(--s-2)">
-        <button class="ghost grow" class:armok={scope === 'district'} onclick={() => (scope = 'district')}>your district (YOLO ok)</button>
-        <button class="ghost grow" class:armok={scope === 'shared'} onclick={() => (scope = 'shared')}>SHARED (oracle gate)</button>
+        <button class="ghost grow" class:armok={scope === 'district'} onclick={() => (scope = 'district')}>your district</button>
+        <button class="ghost grow" class:armok={scope === 'shared'} onclick={() => (scope = 'shared')}>SHARED works</button>
       </div>
-      <button class="primary" disabled={deployBusy} onclick={deploy}>
-        {deployBusy ? 'the oracle is reading…' : scope === 'shared' ? '🔮 DEPLOY THROUGH THE GATE' : 'DEPLOY (your rubble)'}
-      </button>
+      <div class="row" style="gap:var(--s-2)">
+        <button class="primary grow" disabled={deployBusy} onclick={deploy}>
+          {deployBusy ? 'deploying…' : scope === 'shared' ? 'DEPLOY TO SHARED (direct)' : 'DEPLOY (direct)'}
+        </button>
+        <button class="oracle" disabled={betaBusy} onclick={betaRun} title="rehearse in the Mirror Yard — a private fork of the current world">
+          {betaBusy ? 'the mirror…' : `🪞 BETA ×${betaTicks}`}
+        </button>
+        <select bind:value={betaTicks} title="beta ticks">
+          {#each [1, 3, 5, 10] as n (n)}<option value={n}>{n}</option>{/each}
+        </select>
+      </div>
       {#if gateReport}
         <div class="verdict err">
-          <b>🚧 THE GATE held:</b>
+          <b>🚧 a gate held:</b>
           {#each gateReport as r, ri (ri)}<div class="mono" style="font-size:var(--t-sm)">{r}</div>{/each}
         </div>
       {/if}
-      <p class="faint">shared structures (wall/granary/beacon/ark) accept parts only from VERIFIED shared-scope scripts. Your district is your branch — anything goes, it's your rubble. Unverified scripts also take extra storm damage.</p>
+      {#if betaReport}
+        <div class="verdict" class:err={!betaReport.ok}>
+          <b>🪞 Mirror Yard — {betaReport.ok ? 'PASS' : 'FAILED'}</b> <span class="muted num">({betaReport.ticks} ticks from tick {betaReport.fromTick})</span>
+          <div class="faint num">yields: {betaReport.totals.ore} ore · {betaReport.totals.food} food · {betaReport.totals.parts} parts · {betaReport.totals.contributed} contributed</div>
+          {#if betaReport.storm}
+            <div class="faint">🌪 storm {betaReport.storm.index} lands in-window (severity {betaReport.storm.severity}) — your district would take {betaReport.storm.yourDamage}</div>
+          {/if}
+          {#each betaReport.failures.slice(0, 4) as f, fi (fi)}<div class="mono" style="font-size:var(--t-sm)">{f}</div>{/each}
+          {#each betaReport.lore as l, li (li)}<div class="faint">🗝 {l}</div>{/each}
+          {#each betaReport.perTick.slice(0, 3) as t (t.tick)}<div class="faint mono logline">tick {t.tick}: {t.note}</div>{/each}
+        </div>
+      {/if}
+      <p class="faint">You deploy DIRECTLY — the server imposes no gate. Only scope=SHARED scripts can touch the shared works; unverified scripts take extra storm damage. Your own gates (below) are the discipline you choose.</p>
+    </div>
+
+    <!-- YOUR GATES (human-owned) -->
+    {#if view.you}
+      <div class="card stack">
+        <b>⚙️ Your gates <span class="muted">(yours to set — the hinge)</span></b>
+        {#each GATE_SCOPES as gscope (gscope)}
+          <div class="row" style="gap:var(--s-3); flex-wrap:wrap">
+            <span class="muted" style="min-width:64px">{gscope}</span>
+            {#each GATE_REQS as req (req)}
+              <label class="row" style="gap:var(--s-1)">
+                <input
+                  type="checkbox"
+                  checked={view.you.gatePolicy[gscope].includes(req)}
+                  onchange={(e) => setGate(gscope, req, (e.currentTarget as HTMLInputElement).checked)}
+                />
+                {req}
+              </label>
+            {/each}
+          </div>
+        {/each}
+        <p class="faint" style="margin:0">Your agent deploys freely by default. Gates you set here bind ITS deploys (and yours): oracle-green = live dry-run must pass; beta-pass = a green Mirror Yard run of that exact script first. A wise dyad designs its own.</p>
+      </div>
+    {/if}
+
+    <!-- THE CHRONICLE (phone-compact; the board carries the feed) -->
+    <div class="card stack">
+      <b>📜 The Chronicle <span class="muted num">({view.chronicleCount})</span></b>
+      {#each [...view.chronicle].slice(-3).reverse() as c (c.id)}
+        <div class="faint">{c.kind === 'discovery' ? '🗝' : '·'} <b>{view.dyads[c.author]?.name ?? `D${c.author}`}</b> {c.text}</div>
+      {/each}
+      <div class="row" style="gap:var(--s-2)">
+        <input class="grow" placeholder="write what you learned (costs ⚡)" bind:value={chronText} maxlength="500" />
+        <button class="ghost" onclick={postChronicle}>post</button>
+      </div>
     </div>
 
     <!-- AGENT -->
     <div class="card stack">
       <b>🤖 Connect your agent</b>
-      <p class="muted" style="margin:0">Copy the prompt into YOUR agent (Claude Code / codex / copilot). It gets the WORKER token — it can write and deploy scripts. The launch vote stays on this phone.</p>
+      <p class="muted" style="margin:0">Copy the prompt into YOUR agent (Claude Code / codex / copilot). It gets the WORKER token — it deploys directly, within the gates you set above. The launch vote stays with your hinge token (on this phone, or handed over when YOU choose).</p>
       <button class="oracle" onclick={copyAgentPrompt}>copy the agent prompt</button>
     </div>
+
+    {#if isHost}
+      <div class="card stack">
+        <b>🎛 Host controls</b>
+        <button class="yolo" onclick={endGame}>🌙 END THE GAME (everyone sees the end screen, then the settlement closes)</button>
+      </div>
+    {/if}
 
     <p class="faint" style="text-align:center">board: <span class="mono">{location.host}/#/board/{roomPin}</span> · rules: <a href="/wiki">/wiki</a></p>
   </div>

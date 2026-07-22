@@ -10,6 +10,12 @@
 
 import {
   ACTIONS_PER_TICK_MAX,
+  CHRONICLE_COST,
+  CHRONICLE_EVIDENCE_LEN_MAX,
+  CHRONICLE_EVIDENCE_MAX,
+  CHRONICLE_MAX_ENTRIES,
+  CHRONICLE_RELATES_MAX,
+  CHRONICLE_TEXT_MAX,
   DEPLOY_COST,
   DISTRICT_INTEGRITY_MAX,
   MAX_DYADS,
@@ -69,7 +75,9 @@ export function newGame(seed = 1): SimState {
     granaryFood: 0,
     survivors: 0,
     launched: false,
+    endedEarly: false,
     end: null,
+    chronicle: [],
     events: [],
     eventSeq: 0,
   }
@@ -149,9 +157,11 @@ export function apply(s: SimState, cmd: Command): void {
       if (typeof cmd.source !== 'string' || cmd.source.trim().length === 0) fail('script source must be non-empty Starlark')
       if (cmd.source.length > SOURCE_MAX_BYTES) fail(`script source too large (${cmd.source.length} bytes, max ${SOURCE_MAX_BYTES})`)
       if (!VALID_SCOPES.includes(cmd.scope)) fail(`scope must be 'district' or 'shared'`)
-      // THE DEPLOY GATE, sim-enforced backstop: shared scope requires the
-      // oracle-green run the server performed (verified travels as data).
-      if (cmd.scope === 'shared' && !cmd.verified) fail('shared deploys require an oracle-green run — the deploy gate')
+      // FREEDOM UPDATE: no server-imposed verification on ANY scope. An
+      // unverified shared deploy is representable and legal — the seat's OWN
+      // gate policy (server-side, human-owned) is the only deploy gate, and
+      // the storm still prices unverified work. verified arrives as data when
+      // a policy (or a paid check) ran the oracle.
       const existing = d.scripts.find((x) => x.id === cmd.id)
       if (existing && existing.status === 'running') fail(`script '${cmd.id}' is already deployed — undeploy it first`)
       const running = d.scripts.filter((x) => x.status === 'running').length
@@ -218,7 +228,11 @@ export function apply(s: SimState, cmd: Command): void {
         return
       }
       sc.errStreak = 0
-      const gated = sc.scope === 'shared' && sc.verified
+      // FREEDOM UPDATE: scope IS the boundary — a shared-scope deployment may
+      // touch the shared works whether or not it is verified (verification is
+      // storm armor + your own gate's evidence, no longer a runtime lock).
+      // District scripts stay in the district: that's what scope MEANS.
+      const gated = sc.scope === 'shared'
       const ore0 = d.ore
       const food0 = d.food
       const parts0 = d.parts
@@ -267,12 +281,59 @@ export function apply(s: SimState, cmd: Command): void {
       emit(s, { t: 'voteCast', dyad: p, go: d.vote })
       return
     }
+    case 'spend': {
+      // A ⚡ debit for a server-side service (beta runs). The service itself
+      // is a query and never enters the log; the economy must replay.
+      const amount = typeof cmd.amount === 'number' && Number.isFinite(cmd.amount) ? Math.floor(cmd.amount) : 0
+      if (amount < 1) fail('spend amount must be a positive integer')
+      if (d.tokens < amount) fail(`not enough ⚡ (${cmd.reason || 'this'} costs ${amount})`)
+      d.tokens -= amount
+      return
+    }
+    case 'chronicle': {
+      const kind: 'claim' | 'discovery' = cmd.kind === 'discovery' ? 'discovery' : 'claim'
+      const text = (cmd.text ?? '').trim().replace(/\s+/g, ' ')
+      if (text.length === 0) fail('the chronicle refuses empty entries')
+      if (text.length > CHRONICLE_TEXT_MAX) fail(`chronicle entry too long (${text.length} chars, max ${CHRONICLE_TEXT_MAX})`)
+      if (s.chronicle.length >= CHRONICLE_MAX_ENTRIES) fail(`the chronicle is full (${CHRONICLE_MAX_ENTRIES} entries) — the book closes`)
+      // novelty dedupe: an exact duplicate (case-insensitive, whitespace-
+      // collapsed) adds nothing to the collective memory
+      const norm = text.toLowerCase()
+      if (s.chronicle.some((e) => e.text.toLowerCase() === norm)) fail('the chronicle already holds that exact claim — relate to it, or say something new')
+      const evidence = (Array.isArray(cmd.evidence) ? cmd.evidence : [])
+        .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+        .slice(0, CHRONICLE_EVIDENCE_MAX)
+        .map((x) => x.trim().slice(0, CHRONICLE_EVIDENCE_LEN_MAX))
+      const relatesTo = (Array.isArray(cmd.relatesTo) ? cmd.relatesTo : [])
+        .filter((x): x is number => typeof x === 'number' && Number.isInteger(x))
+        .slice(0, CHRONICLE_RELATES_MAX)
+      for (const rid of relatesTo) {
+        if (rid < 1 || rid > s.chronicle.length) fail(`relates-to #${rid} does not exist in the chronicle`)
+      }
+      if (!cmd.free) {
+        if (d.tokens < CHRONICLE_COST) fail(`not enough ⚡ (a chronicle claim costs ${CHRONICLE_COST})`)
+        d.tokens -= CHRONICLE_COST
+      }
+      const entry = { id: s.chronicle.length + 1, author: p, kind, text, evidence, relatesTo, atTick: s.tick }
+      s.chronicle.push(entry)
+      emit(s, { t: 'chronicle', dyad: p, id: entry.id, kind, snippet: text.slice(0, 80) })
+      return
+    }
     case 'launch': {
       if (!s.structures.ark.complete) fail('the ark is not built yet')
       if (!launchMajority(s)) fail(`no majority — ${goVotes(s)} GO of ${s.dyads.length} dyads (need more than half)`)
       s.launched = true
       s.end = computeEndStats(s)
       emit(s, { t: 'launch', goVotes: goVotes(s), dyads: s.dyads.length })
+      return
+    }
+    case 'end': {
+      // The host calls the game (anti-immortal-rooms). The world rests, end
+      // stats are captured AS THEY STAND, the books open — no launch.
+      s.launched = true
+      s.endedEarly = true
+      s.end = computeEndStats(s)
+      emit(s, { t: 'ended' })
       return
     }
   }
@@ -411,7 +472,9 @@ export function snap(s: SimState): string {
     granaryFood: s.granaryFood,
     survivors: s.survivors,
     launched: s.launched,
+    endedEarly: s.endedEarly,
     end: s.end,
+    chronicle: s.chronicle,
   })
 }
 

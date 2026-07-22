@@ -17,6 +17,8 @@
 // Builtins: act(verb, **params) · rand() · randint(n) · remember(k, v) ·
 // recall(k, default) · print(...) — plus the deterministic Starlark universe.
 
+import { CONTRIBUTE_RATE_MAX, ORE_PER_PART, STORE_RATE_MAX } from './sim/balance.ts'
+
 export interface Template {
   id: string
   name: string
@@ -55,11 +57,13 @@ act("farm", rate=3)
     id: 'smith',
     name: 'Parts Smith',
     scope: 'district',
-    blurb: 'crafts ark parts whenever there is ore to spare (4 ore = 1 part)',
-    source: `# Parts Smith — turn ore into parts, keep a small ore buffer.
-if world["you"]["ore"] >= 8:
+    // numbers DERIVED from balance.ts (the wiki drift-catcher pattern — the
+    // blurb and the thresholds can never disagree with ORE_PER_PART again)
+    blurb: `crafts ark parts whenever there is ore to spare (${ORE_PER_PART} ore = 1 part)`,
+    source: `# Parts Smith — turn ore into parts (${ORE_PER_PART} ore = 1 part).
+if world["you"]["ore"] >= ${ORE_PER_PART * 2}:
     act("craft", amount=2)
-elif world["you"]["ore"] >= 4:
+elif world["you"]["ore"] >= ${ORE_PER_PART}:
     act("craft", amount=1)
 `,
   },
@@ -69,15 +73,15 @@ elif world["you"]["ore"] >= 4:
     scope: 'shared',
     blurb: 'SHARED: pushes your parts into the current milestone (needs the oracle gate)',
     source: `# Frontier Builder — contribute parts to the next milestone.
-# SHARED SCOPE: this script only lands parts if it deployed oracle-green.
+# SHARED SCOPE: only shared-scope deploys may touch the shared works.
 target = world["frontier"]
 if target == None:
     # everything is built — top up the wall before the next storm
     target = "wall"
 parts = world["you"]["parts"]
 if parts > 0:
-    act("contribute", structure=target, amount=min(parts, 5))
-    print("contributing", min(parts, 5), "to", target)
+    act("contribute", structure=target, amount=min(parts, ${CONTRIBUTE_RATE_MAX}))
+    print("contributing", min(parts, ${CONTRIBUTE_RATE_MAX}), "to", target)
 `,
   },
   {
@@ -87,8 +91,8 @@ if parts > 0:
     blurb: 'SHARED: farms, then stores food in the granary once it stands',
     source: `# Quartermaster — keep the granary stocked so survivors can arrive.
 act("farm", rate=3)
-if world["structures"]["granary"]["complete"] and world["you"]["food"] >= 6:
-    act("store", amount=5)
+if world["structures"]["granary"]["complete"] and world["you"]["food"] >= ${STORE_RATE_MAX + 1}:
+    act("store", amount=${STORE_RATE_MAX})
 `,
   },
 ]

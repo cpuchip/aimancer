@@ -252,6 +252,84 @@ old smoke/wstest suites (their still-true floors — replay identity, token
 economy, vein mechanics, redaction, feed dedup — carried into the new
 suites). Git history keeps them; the D1-D6 notes above are historical.
 
+## ★★ THE FREEDOM UPDATE (2026-07-22 locked design → shipped)
+
+Ungated deploys + player-built gates + the Mirror Yard + the Chronicle +
+hidden surfaces + room lifecycle. The server stopped forcing discipline; the
+storm still prices its absence; the winners build their own gates.
+
+1. **Ungated deploys:** the server-imposed oracle-green requirement on SHARED
+   deploys is GONE (server 409 removed, sim backstop removed, runtime
+   contribute/store lock removed — scope alone is the boundary: district
+   scripts still can't touch the shared works). The engine sandbox stays the
+   absolute floor. Launch VOTE unchanged: hinge-only + host-confirm.
+2. **Per-seat GATE POLICY** (`shared/gatePolicy.ts`): hinge-configured, per
+   scope: none (default) | `oracle-green` | `beta-pass` | combos. Enforced
+   server-side on the seat's OWN deploys; blocks are PRIVATE seat notices
+   (`you.notices`). API: GET (either token) / PUT (hinge) `gate-policy`.
+3. **The MIRROR YARD** (`server/beta.ts`): `POST beta-run` {script, scope,
+   ticks 1-10}, either token, BETA_RUN_COST ⚡. Forks the current world,
+   runs the candidate through the REAL engine deterministically, private
+   report (per-tick notes, yield deltas, failures, in-window storm damage).
+   The ⚡ debit is logged (`spend` command — the economy replays); the run
+   never is. A clean run = a beta-pass for that exact source+scope.
+4. **The CHRONICLE** (sim state + `chronicle` command — REPLAY DATA):
+   POST claims (CHRONICLE_COST ⚡, exact-dupe rejected, evidence refs +
+   relates-to links), GET public w/ author/q filters, board feed + phone
+   panel. Discoveries auto-enter FREE with first-finder celebration.
+5. **HIDDEN SURFACES** (`server/registry.ts`, data-driven): loads
+   `lore/content-map.json` when present (ships with 6 placeholder surfaces +
+   2 canon names until the lore pass lands — content lands with NO code
+   changes). Kinds: help-topic (`GET /api/help/:topic` — documented topics
+   public, hidden ones answer a seat token), endpoint (`GET
+   /api/room/:pin/<key>`), verb (act("<key>") stripped + answered, may grant
+   a per-seat world-field). Conditions (structure/tick/survivors) make unmet
+   surfaces indistinguishable from nothing. **The clipped tongue (ruling,
+   supersedes the I/O rule):** the PIN alphabet drops ALL vowels+y
+   (`BCDFGHJKLMNPQRSTVWXZ`, 160k codes — profanity-proof); NO canon name is
+   drawable, ALL are structurally retired (KILN/VELD/HUSH/GRIT/MOTH kept as
+   rite material); draw-recognition removed; `Room.displayName` (+view) is
+   the EARNED-name hook for the future Rite of Naming content drop.
+   **★ THE CLUE ENGINE:** canon static, INSTANCE seeded —
+   `{{pool:<name>}}` template slots in fragments/world-fields/world-values
+   resolve per room via `hashNoise(roomSeed, 0, salt(name)) % pool.length`
+   (`resolveRegistryForRoom`); pools are content-map data (`pools`);
+   demo: the surveyor's bench names a different noop-field
+   (door/window/hatch/socket/plug/terminal) in every room. Writeups can't
+   spoil rooms; replays stay deterministic. Glyph-permutation bindings
+   compose from one slot per element (hook documented for the lore pass);
+   vein placement/richness was already pure f(seed) — confirmed.
+6. **Room lifecycle (anti-immortal-rooms):** `POST end` (host hinge) → end
+   screen as it stands (`endedEarly`), room torn down after END_GRACE_MS
+   (~2 min); launched rooms tear down after REVEAL_TTL_MS (~10 min), sockets
+   or not; the inactivity sweeper covers abandoned rooms (all wstest-proven,
+   knobs env-tunable).
+7. **Hinge custody (ruled):** vote/launch/end/gate-policy ENDPOINTS stay
+   hinge-gated structurally; hinge-token CUSTODY is the player's choice — a
+   CLI-only human hands the token at vote time (the prompt teaches "handed,
+   not taken"); join/create responses label both tokens (`tokenRoles`).
+8. **UI:** phone — direct deploy + beta button/report + gate-policy editor
+   (hinge) + notices + chronicle post + host END. BOARD (the projector,
+   prioritized): worker-shuttle dots animate live gathering vein→district,
+   chronicle feed panel, discovery celebrations, ended-early banner.
+9. **aimancer-go:** GatePolicy/SetGatePolicy/BetaRun/ChroniclePost/Chronicle/
+   Help/End client methods; the reference bot BUILDS ITS OWN GATE (binds
+   shared=[beta-pass] via its hinge, rehearses the builder in the Mirror Yard
+   before every shared deploy, writes its practice into the chronicle).
+10. Drift fix (lore steward's catch): the Parts Smith template now derives
+    its blurb + thresholds from ORE_PER_PART (was hardcoded to 4; truth is 6);
+    builder/quartermaster numbers derive from balance too; smoke pins it.
+
+Gates grew: smoke 158→208 · enginetest 29 · wstest 69→137 · liveproof 9→18.
+BREAKING (documented): unverified shared deploys now LAND (200, verified
+false) — the pre-freedom 409 is gone; `oracleResult` red no longer blocks
+shared actions at runtime (armor only). Additive: gate-policy/beta-run/
+chronicle/end/help endpoints, `endedEarly`+`chronicle`+`you.gatePolicy`+
+`you.notices` in views, `spend`/`chronicle`/`end` commands in the log.
+AWAITING the lore content-map: real fragments/canon names/conditions replace
+the placeholders the moment `lore/content-map.json` ships (loader + validator
+live; malformed entries skipped loud).
+
 ### Next (the polish day)
 
 - Storm/milestone/launch SFX + art pass (asset-harness). **★ Lore asset pass

@@ -51,6 +51,27 @@
   const wallPct = $derived(view ? Math.min(100, Math.round((100 * view.structures.wall.hp) / Math.max(1, view.structures.wall.hpMax))) : 0)
   const arkPct = $derived(view ? Math.min(100, Math.round((100 * view.structures.ark.parts) / view.structures.ark.partsRequired)) : 0)
   const ranked = $derived(view ? [...view.dyads].sort((a, b) => b.contributed - a.contributed) : [])
+  // LIVE ACTIVITY: a shuttle dot per actively-gathering script (parsed from
+  // the public lastNote — "+4 ore from vein #2"), vein → district. The
+  // projector shows the swarm working.
+  const shuttles = $derived(
+    view
+      ? view.dyads.flatMap((d) => {
+          const pos = districtPos(d.index, view!.dyads.length)
+          return d.scripts
+            .map((sc) => {
+              if (sc.status !== 'running' || !sc.lastNote) return null
+              const m = sc.lastNote.match(/ore from vein #(\d+)/)
+              if (!m) return null
+              const vein = view!.veins.find((v) => v.id === Number(m[1]))
+              if (!vein) return null
+              return { key: `${d.index}:${sc.id}`, x: vein.x, y: vein.y, dx: pos.x - vein.x, dy: pos.y - vein.y, verified: sc.verified }
+            })
+            .filter((w): w is NonNullable<typeof w> => w !== null)
+        })
+      : [],
+  )
+  const chronicleFeed = $derived(view ? [...view.chronicle].reverse().slice(0, 8) : [])
   const stormClockMs = $derived(view && view.nextTickInMs !== null ? Math.max(0, (view.storm.inTicks - 1) * view.tickMs + view.nextTickInMs - (clockNow - snapAt)) : null)
   const agentLive = (agoMs: number | null) => agoMs !== null && agoMs + (clockNow - snapAt) < 60_000
 </script>
@@ -64,8 +85,8 @@
 
   {#if view && view.launched && view.end}
     <div class="phase-banner phase-reveal">
-      <span class="title">🚀 THE ARK HAS LAUNCHED</span>
-      <span class="sub">{view.end.goVotes} GO of {view.end.dyads.length} dyads · {view.end.stormsWeathered} storms weathered · {view.end.survivors} survivors aboard · {view.end.totalParts} parts built</span>
+      <span class="title">{view.endedEarly ? '🌙 THE HOST CALLED IT' : '🚀 THE ARK HAS LAUNCHED'}</span>
+      <span class="sub">{view.endedEarly ? 'the settlement rests' : `${view.end.goVotes} GO of ${view.end.dyads.length} dyads`} · {view.end.stormsWeathered} storms weathered · {view.end.survivors} survivors {view.endedEarly ? 'sheltering' : 'aboard'} · {view.end.totalParts} parts built</span>
     </div>
     <div class="delta-total">
       THE SETTLEMENT HELD FOR <span class="delta-pos">{view.end.launchedAtTick}</span> TICKS
@@ -146,6 +167,14 @@
           </div>
         {/each}
 
+        <!-- the swarm at work: one shuttle per actively-gathering script -->
+        {#each shuttles as w (w.key)}
+          <span
+            class="worker"
+            style="left:{w.x}%; top:{w.y}%; background:{w.verified ? 'var(--ok-strong, #2e8b57)' : '#b8860b'}; --dx:{w.dx}cqw; --dy:{w.dy}cqh"
+          ></span>
+        {/each}
+
         <!-- districts ring the settlement -->
         {#each view.dyads as d (d.index)}
           {@const pos = districtPos(d.index, view.dyads.length)}
@@ -202,6 +231,16 @@
               <div class={item.big ? 'theater-big' : item.good ? 'theater-good' : ''}>{item.line}</div>
             {/each}
             {#if theater.length === 0}<div class="muted">quiet… build while it lasts</div>{/if}
+          </div>
+          <h2>📜 The Chronicle <span class="muted num" style="font-size:var(--t-sm)">({view.chronicleCount})</span></h2>
+          <div class="events">
+            {#each chronicleFeed as c (c.id)}
+              <div class={c.kind === 'discovery' ? 'theater-good' : ''}>
+                {c.kind === 'discovery' ? '🗝' : '·'} <b>{view.dyads[c.author]?.name ?? `D${c.author}`}</b> {c.text}
+                {#if c.relatesTo.length > 0}<span class="faint num"> ↩ #{c.relatesTo.join(' #')}</span>{/if}
+              </div>
+            {/each}
+            {#if chronicleFeed.length === 0}<div class="muted">nothing written yet — the first discovery starts the book</div>{/if}
           </div>
         </div>
       </div>

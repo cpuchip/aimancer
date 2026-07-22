@@ -149,7 +149,8 @@ export interface ActionOutcome {
 }
 
 /** Execute ONE emitted action for one dyad. `gated` = may this action touch
- * shared structures (scope==='shared' && verified — THE DEPLOY GATE)?
+ * shared structures (scope==='shared' — the scope boundary; FREEDOM UPDATE:
+ * verification is storm armor, not a runtime lock)?
  * Mutates dyad / veins / structures / granaryFood via `s`. Deterministic. */
 export function runAction(s: SimState, d: Dyad, a: Action, gated: boolean): ActionOutcome {
   switch (a.type) {
@@ -184,7 +185,7 @@ export function runAction(s: SimState, d: Dyad, a: Action, gated: boolean): Acti
       if (kind !== 'wall' && kind !== 'granary' && kind !== 'beacon' && kind !== 'ark') {
         return { applied: false, note: `unknown structure '${String(kind)}' — wall|granary|beacon|ark` }
       }
-      if (!gated) return { applied: false, note: `GATE: contribute refused — shared structures need a VERIFIED shared-scope script` }
+      if (!gated) return { applied: false, note: `GATE: contribute refused — district scripts stay home; deploy with scope='shared' to touch the shared works` }
       if (!structureUnlocked(s, kind)) return { applied: false, note: `${kind} is locked — finish the earlier milestone first` }
       const st = s.structures[kind]
       const wantRaw = Math.max(0, Math.min(intParam(a, 'amount'), CONTRIBUTE_RATE_MAX))
@@ -208,7 +209,7 @@ export function runAction(s: SimState, d: Dyad, a: Action, gated: boolean): Acti
       return { applied: true, note: `+${n} part${n === 1 ? '' : 's'} → ${kind}`, completed, contributed: n }
     }
     case 'store': {
-      if (!gated) return { applied: false, note: `GATE: store refused — the granary is shared; use a VERIFIED shared-scope script` }
+      if (!gated) return { applied: false, note: `GATE: store refused — the granary is shared; deploy with scope='shared' to stock it` }
       if (!s.structures.granary.complete) return { applied: false, note: 'the granary is not built yet' }
       const n = Math.max(0, Math.min(intParam(a, 'amount'), STORE_RATE_MAX, d.food))
       if (n <= 0) return { applied: false, note: d.food <= 0 ? 'no food to store' : `store amount must be 1..${STORE_RATE_MAX}` }

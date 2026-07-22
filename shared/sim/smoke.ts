@@ -12,6 +12,10 @@ import {
   ACTIONS_PER_TICK_MAX,
   ARK_PARTS_REQUIRED,
   BEACON_PARTS_REQUIRED,
+  BETA_RUN_COST,
+  CHRONICLE_COST,
+  CHRONICLE_MAX_ENTRIES,
+  CHRONICLE_TEXT_MAX,
   CONTRIBUTE_RATE_MAX,
   DEPLOY_COST,
   DISTRICT_INTEGRITY_MAX,
@@ -39,6 +43,7 @@ import {
   WALL_PARTS_REQUIRED,
 } from './balance.ts'
 import { freshEvents, newFeedCursor } from '../eventFeed.ts'
+import { defaultGatePolicy, describeGatePolicy, normalizeGatePolicy } from '../gatePolicy.ts'
 import { rulesMarkdown } from '../rules.ts'
 import { TEMPLATES } from '../templates.ts'
 import { checkAction, judgeDryRun, staticCheck } from './oracle.ts'
@@ -148,9 +153,11 @@ function evTypes(s: SimState): string[] {
     'oversized source refused',
   )
   throws(() => apply(s, { t: 'deploy', player: 0, id: 'x', name: 'x', source: SRC, scope: 'main' as never, verified: false }), 'bad scope refused')
-  // THE GATE, sim backstop: a shared deploy without a green verdict cannot
-  // even be REPRESENTED in the log
-  throws(() => dep(s, 0, 'evil', 'shared', false), 'shared deploy without oracle-green refused (sim backstop)')
+  // FREEDOM UPDATE: an UNVERIFIED shared deploy is representable and legal —
+  // the server-imposed gate is gone (the seat's own policy lives server-side)
+  dep(s, 0, 'free', 'shared', false)
+  ok(s.dyads[0].scripts.find((x) => x.id === 'free')?.verified === false, 'unverified shared deploy lands (FREEDOM: no sim backstop)')
+  apply(s, { t: 'undeploy', player: 0, id: 'free' })
   dep(s, 0, 'a', 'district')
   throws(() => dep(s, 0, 'a', 'district'), 'duplicate running id refused')
   dep(s, 0, 'b', 'district')
@@ -203,31 +210,35 @@ function evTypes(s: SimState): string[] {
   ok(d.food === food0 + ACTIONS_PER_TICK_MAX, `action cap applied (${ACTIONS_PER_TICK_MAX}/tick)`)
 }
 
-// ── 5. THE DEPLOY GATE at runtime: district scripts can't touch shared ──────
+// ── 5. SCOPE at runtime (FREEDOM): district can't touch shared; shared can,
+//      verified or not — verification is storm armor, not a runtime lock ─────
 {
   const s = game(1)
   const d = s.dyads[0]
-  d.parts = 10
-  dep(s, 0, 'yolo', 'district') // unverified, district scope
+  d.parts = 15
+  dep(s, 0, 'yolo', 'district') // district scope — the yard boundary
   stk(s, 0, 'yolo', [{ type: 'contribute', structure: 'wall', amount: 5 }])
-  ok(s.structures.wall.parts === 0, 'GATE: district script contribution dropped')
-  ok(d.parts === 10, 'GATE: parts stay home')
-  ok(evTypes(s).includes('gateRefused'), 'GATE: refusal is public')
-  ok((d.scripts[0].lastTick?.note ?? '').includes('GATE'), 'GATE: note is honest')
-  dep(s, 0, 'good', 'shared', true)
-  stk(s, 0, 'good', [{ type: 'contribute', structure: 'wall', amount: 5 }])
-  ok(s.structures.wall.parts === 5, 'verified shared script contributes')
-  ok(d.parts === 5 && d.contributed === 5, 'contribution bookkeeping')
+  ok(s.structures.wall.parts === 0, 'SCOPE: district script contribution dropped')
+  ok(d.parts === 15, 'SCOPE: parts stay home')
+  ok(evTypes(s).includes('gateRefused'), 'SCOPE: refusal is public')
+  ok((d.scripts[0].lastTick?.note ?? '').includes('GATE'), 'SCOPE: note is honest')
+  // FREEDOM: an UNVERIFIED shared script contributes — the runtime lock is gone
+  dep(s, 0, 'free', 'shared', false)
+  stk(s, 0, 'free', [{ type: 'contribute', structure: 'wall', amount: 5 }])
+  ok(s.structures.wall.parts === 5, 'FREEDOM: unverified shared script contributes')
+  ok(d.parts === 10 && d.contributed === 5, 'contribution bookkeeping')
   ok(s.structures.wall.hp === 5 * WALL_HP_PER_PART, 'wall parts add HP')
   ok(evTypes(s).includes('contributed'), 'contribution announced')
-  // the oracle is the switch: a red check CLOSES the gate again
+  // the oracle still switches VERIFIED (storm armor + the badge) — but a red
+  // check no longer stops the work
+  dep(s, 0, 'good', 'shared', true)
+  ok(s.dyads[0].scripts.find((x) => x.id === 'good')?.verified === true, 'policy-verified shared deploy lands verified')
   apply(s, { t: 'oracleResult', player: 0, id: 'good', ok: false, reasons: ['edited into nonsense'] })
-  ok(s.dyads[0].scripts.find((x) => x.id === 'good')?.verified === false, 'red verdict revokes verified')
+  ok(s.dyads[0].scripts.find((x) => x.id === 'good')?.verified === false, 'red verdict revokes verified (armor off)')
   stk(s, 0, 'good', [{ type: 'contribute', structure: 'wall', amount: 5 }])
-  ok(s.structures.wall.parts === 5, 'gate closed after red verdict')
+  ok(s.structures.wall.parts === 10, 'FREEDOM: red verdict does NOT stop shared work (the storm prices it instead)')
   apply(s, { t: 'oracleResult', player: 0, id: 'good', ok: true, reasons: [] })
-  stk(s, 0, 'good', [{ type: 'contribute', structure: 'wall', amount: 5 }])
-  ok(s.structures.wall.parts === 10, 'green verdict reopens the gate')
+  ok(s.dyads[0].scripts.find((x) => x.id === 'good')?.verified === true, 'green verdict re-arms the armor')
 }
 
 // ── 6. Milestones: strict order, latch, frontier ────────────────────────────
@@ -473,12 +484,24 @@ function evTypes(s: SimState): string[] {
     ['regen', `+${TOKEN_REGEN}/tick`],
     ['storm base', `severity ${STORM_SEVERITY_BASE}`],
     ['unverified extra', `+${STORM_UNVERIFIED_EXTRA}`],
-    ['gate words', 'deploy gate'],
+    ['gate-policy words', 'GATE POLICY'],
+    ['freedom words', 'You deploy directly'],
+    ['mirror yard', 'Mirror Yard'],
+    ['beta cost', `${BETA_RUN_COST}⚡`],
+    ['chronicle words', 'Chronicle'],
+    ['chronicle cost', `${CHRONICLE_COST}⚡`],
+    ['the honest hint', 'more than it admits'],
+    ['host end', 'end the game early'],
+    ['hinge custody', 'handed, not taken'],
     ['vote words', 'GO/NO-GO'],
     ['veins initial', `${VEINS_INITIAL} at settlement founding`],
   ] as const) {
     ok(md.includes(needle), `rules carry ${label}`)
   }
+  // the smith template derives from ORE_PER_PART (the drift-catcher pattern)
+  const smith = TEMPLATES.find((t) => t.id === 'smith')!
+  ok(smith.blurb.includes(`${ORE_PER_PART} ore = 1 part`), 'smith blurb derives from ORE_PER_PART')
+  ok(smith.source.includes(`>= ${ORE_PER_PART}`) && smith.source.includes(`>= ${ORE_PER_PART * 2}`), 'smith thresholds derive from ORE_PER_PART')
   ok(TEMPLATES.length >= 4, 'the template library holds the agentless floor')
   ok(TEMPLATES.some((t) => t.scope === 'shared'), 'a shared-scope template exists')
   ok(TEMPLATES.every((t) => staticCheck(t.source).ok), 'every template passes static checks')
@@ -520,6 +543,109 @@ function evTypes(s: SimState): string[] {
   const idleS = game(1, 5)
   for (let i = 0; i < 120; i++) tick(idleS)
   ok(idleS.dyads[0].integrity < DISTRICT_INTEGRITY_MAX, 'an unwalled settlement pays for it')
+}
+
+// ── 16. SPEND: the beta debit command (economy replays; service does not) ───
+{
+  const s = game(1)
+  const d = s.dyads[0]
+  apply(s, { t: 'spend', player: 0, amount: BETA_RUN_COST, reason: 'beta-run' })
+  ok(d.tokens === TOKEN_START - BETA_RUN_COST, 'spend debits')
+  throws(() => apply(s, { t: 'spend', player: 0, amount: 0, reason: 'x' }), 'spend zero refused')
+  throws(() => apply(s, { t: 'spend', player: 0, amount: -3, reason: 'x' }), 'spend negative refused')
+  throws(() => apply(s, { t: 'spend', player: 0, amount: 9999, reason: 'beta-run' }), 'spend beyond balance refused')
+  ok(d.tokens === TOKEN_START - BETA_RUN_COST, 'refused spends move nothing')
+}
+
+// ── 17. THE CHRONICLE: cost, dedupe, relates-to, discovery-free, caps ───────
+{
+  const s = game(2)
+  const [a, b] = s.dyads
+  apply(s, { t: 'chronicle', player: 0, text: 'vein 2 dries around tick 40', evidence: ['state tick 41'] })
+  ok(s.chronicle.length === 1 && s.chronicle[0].id === 1 && s.chronicle[0].author === 0, 'claim lands with id 1')
+  ok(a.tokens === TOKEN_START - CHRONICLE_COST, 'a claim costs ⚡')
+  ok(s.chronicle[0].kind === 'claim' && s.chronicle[0].evidence[0] === 'state tick 41', 'kind + evidence recorded')
+  ok(evTypes(s).includes('chronicle'), 'the chronicle speaks on the feed')
+  throws(() => apply(s, { t: 'chronicle', player: 1, text: 'vein 2 dries around tick 40' }), 'exact duplicate refused (novelty dedupe)')
+  throws(() => apply(s, { t: 'chronicle', player: 1, text: '  VEIN 2   dries around tick 40 ' }), 'case/whitespace-normalized duplicate refused')
+  ok(b.tokens === TOKEN_START, 'refused claims cost nothing')
+  apply(s, { t: 'chronicle', player: 1, text: 'the storm schedule is seeded', relatesTo: [1] })
+  ok(s.chronicle[1].relatesTo[0] === 1, 'relates-to links an earlier entry')
+  throws(() => apply(s, { t: 'chronicle', player: 1, text: 'phantom link', relatesTo: [99] }), 'relates-to a phantom entry refused')
+  throws(() => apply(s, { t: 'chronicle', player: 0, text: '' }), 'empty entry refused')
+  throws(() => apply(s, { t: 'chronicle', player: 0, text: 'x'.repeat(CHRONICLE_TEXT_MAX + 1) }), 'oversized entry refused')
+  const t0 = a.tokens
+  apply(s, { t: 'chronicle', player: 0, kind: 'discovery', free: true, text: '[discovery] the salvage yard — first uncovered by D1' })
+  ok(a.tokens === t0, 'discovery auto-entries are FREE')
+  ok(s.chronicle[2].kind === 'discovery', 'discovery kind recorded')
+  const ev = s.events.find((e) => e.t === 'chronicle' && e.kind === 'discovery')
+  ok(ev !== undefined && 'snippet' in ev && (ev as { snippet: string }).snippet.includes('salvage'), 'discovery event carries the snippet')
+  ok(CHRONICLE_MAX_ENTRIES >= 100, 'the book holds a real game')
+}
+
+// ── 18. HOST END: end screen as it stands, no launch, the world rests ───────
+{
+  const s = game(2)
+  for (let i = 0; i < 5; i++) tick(s)
+  apply(s, { t: 'end' })
+  ok(s.launched && s.endedEarly, 'end latches the game over, flagged early')
+  ok(s.end !== null && s.end.launchedAtTick === s.tick, 'end stats captured as they stand')
+  ok(evTypes(s).includes('ended'), 'the end is announced')
+  const t0 = s.tick
+  tick(s)
+  ok(s.tick === t0, 'ticks are no-ops after the end')
+  throws(() => apply(s, { t: 'vote', player: 0, go: true }), 'no votes after the end')
+  throws(() => apply(s, { t: 'end' }), 'no double end')
+  const s2 = game(1)
+  ok(!s2.endedEarly, 'a fresh game is not ended')
+  s2.structures.wall.complete = true
+  s2.structures.granary.complete = true
+  s2.structures.beacon.complete = true
+  s2.structures.ark.complete = true
+  apply(s2, { t: 'vote', player: 0, go: true })
+  apply(s2, { t: 'launch' })
+  ok(s2.launched && !s2.endedEarly, 'a real launch is not flagged early')
+}
+
+// ── 19. REPLAY IDENTITY with the freedom commands in the log ────────────────
+{
+  const seed = 77
+  const live = newGame(seed)
+  const log: Array<{ atTick: number; cmd: Command }> = []
+  const cmd = (c: Command) => {
+    apply(live, c)
+    log.push({ atTick: live.tick, cmd: c })
+  }
+  cmd({ t: 'joinDistrict', name: 'Ada' })
+  cmd({ t: 'deploy', player: 0, id: 'free', name: 'free', source: SRC, scope: 'shared', verified: false }) // FREEDOM: unverified shared, logged
+  cmd({ t: 'chronicle', player: 0, text: 'founding note: the wall comes first' })
+  cmd({ t: 'spend', player: 0, amount: BETA_RUN_COST, reason: 'beta-run' })
+  for (let i = 0; i < 12; i++) {
+    if (live.dyads[0].tokens >= SCRIPT_RUN_COST) {
+      cmd({ t: 'scriptTick', player: 0, id: 'free', actions: [{ type: 'farm', rate: 2 }, { type: 'contribute', structure: 'wall', amount: 1 }], gasUsed: 9 })
+    }
+    tick(live)
+    if (i === 4) cmd({ t: 'chronicle', player: 0, kind: 'discovery', free: true, text: '[discovery] the surveyor’s bench — first uncovered by Ada' })
+  }
+  cmd({ t: 'end' })
+  const replayed = replay(seed, log, live.tick)
+  ok(stateHash(replayed) === stateHash(live), 'REPLAY IDENTITY holds with chronicle/spend/unverified-shared/end in the log')
+  ok(snap(replayed) === snap(live), 'byte-identical snapshots (chronicle included in snap)')
+  ok(replayed.chronicle.length === 2 && replayed.endedEarly, 'replays carry the chronicle and the early end')
+}
+
+// ── 20. GATE POLICY module: normalize + describe (the shared validator) ─────
+{
+  ok(normalizeGatePolicy(null) === null, 'null policy rejected')
+  ok(normalizeGatePolicy('x') === null, 'non-object rejected')
+  ok(normalizeGatePolicy({ shared: ['blastoff'] }) === null, 'unknown requirement rejected')
+  ok(normalizeGatePolicy({ shared: 'oracle-green' }) === null, 'non-array scope rejected')
+  const def = normalizeGatePolicy({})!
+  ok(def.district.length === 0 && def.shared.length === 0, 'empty body = the default (none)')
+  const p = normalizeGatePolicy({ shared: ['beta-pass', 'oracle-green', 'beta-pass'], district: [] })!
+  ok(p.shared.length === 2 && p.shared[0] === 'oracle-green' && p.shared[1] === 'beta-pass', 'dedup + canonical order')
+  ok(describeGatePolicy(defaultGatePolicy()).includes('none'), 'default policy speaks plainly')
+  ok(describeGatePolicy(p).includes('oracle-green + beta-pass'), 'combo policy speaks plainly')
 }
 
 console.log(failCount === 0 ? `SMOKE OK — ${pass} assertions` : `SMOKE FAILED — ${failCount} failures (${pass} passed)`)

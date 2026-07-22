@@ -4,8 +4,10 @@
 // LAUNCH VOTE, and the host's launch confirm). Tokens travel ONLY in the
 // welcome/join responses, only to their own seat.
 
+import type { GatePolicy } from './gatePolicy.ts'
 import type { OracleReport } from './sim/oracle.ts'
 import type {
+  ChronicleEntry,
   EndStats,
   ScriptScope,
   ScriptStatus,
@@ -62,14 +64,58 @@ export interface OwnScriptView extends PublicScriptView {
   lastTick: ScriptTickResult | null
 }
 
+/** A PRIVATE seat notice (server-side, not replay state): your own gate
+ * blocking a deploy, your human changing your gates, lore that answered you.
+ * Newest first, bounded. */
+export interface SeatNotice {
+  atTick: number
+  kind: 'gate-blocked' | 'gate-set' | 'lore' | 'beta'
+  text: string
+}
+
+/** One tick of a Mirror Yard rehearsal (private to the requesting seat). */
+export interface BetaTickView {
+  tick: number
+  ran: boolean
+  note: string
+  gasUsed: number
+  err: string | null
+  logs: string[]
+}
+
+/** The Mirror Yard report — POST /api/room/:pin/beta-run. Private, never
+ * logged (only its ⚡ cost is). ok = the candidate ran every tick without an
+ * error value and emitted only in-schema actions (the beta-pass criterion —
+ * a 'beta-pass' gate policy matches on sourceHash + scope). */
+export interface BetaReport {
+  ok: boolean
+  scope: ScriptScope
+  fromTick: number
+  ticks: number
+  failures: string[]
+  /** Hidden surfaces that answered during the rehearsal (the yard keeps secrets poorly). */
+  lore: string[]
+  perTick: BetaTickView[]
+  /** Deltas for YOUR district across the window (negative = consumed). */
+  totals: { ore: number; food: number; parts: number; contributed: number; granaryFood: number }
+  /** A storm that landed IN-WINDOW, and what it did to your district in the mirror. */
+  storm: { index: number; severity: number; atTick: number; absorbed: number; yourDamage: number } | null
+  sourceHash: string
+}
+
 /** One redacted room snapshot. `you` is present only for a seated recipient
  * and carries THEIR full scripts; other sources never cross the wire until
  * the launch. */
 export interface RoomView {
   room: string
+  /** The settlement's EARNED name (the Rite of Naming — future content drop;
+   * the clipped-tongue PIN alphabet can never draw a name). null until then. */
+  displayName: string | null
   tickMs: number
   tick: number
   launched: boolean
+  /** true = the host called the game (no launch); the end screen says so. */
+  endedEarly: boolean
   /** ms until the next world tick fires (null = world holds still). */
   nextTickInMs: number | null
   storm: StormView
@@ -86,9 +132,20 @@ export interface RoomView {
   events: SimEvent[]
   eventSeq: number
   dyads: DyadView[]
+  /** The most recent chronicle entries (full book: GET /api/room/:pin/chronicle). */
+  chronicle: ChronicleEntry[]
+  chronicleCount: number
   end: EndStats | null
   engine: EngineInfo | null
-  you: { index: number; isHost: boolean; scripts: OwnScriptView[] } | null
+  you: {
+    index: number
+    isHost: boolean
+    scripts: OwnScriptView[]
+    /** YOUR seat's gate policy — human-owned (hinge sets it), agent-visible. */
+    gatePolicy: GatePolicy
+    /** Private notices: gate blocks, gate changes, lore that answered you. */
+    notices: SeatNotice[]
+  } | null
 }
 
 /** The engine identity — pinned into the replay header too. */

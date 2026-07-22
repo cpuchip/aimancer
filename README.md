@@ -7,18 +7,26 @@ scripts** that run every world tick in a sandboxed, deterministic, gas-metered
 Go engine ([cpuchip/aimancer-go](https://github.com/cpuchip/aimancer-go)):
 gather ore from finite veins, farm food, craft parts, build.
 
-**THE DEPLOY GATE** is the whole point. Your district is your branch — deploy
-anything, YOLO allowed, your rubble. The shared structures are protected main:
-a script that contributes to them must pass **the oracle** (a real engine
-dry-run + static checks) and deploy with scope `shared`. Storms come on a
-visible countdown, escalating; the wall absorbs for everyone; **unverified
-running scripts are each district's attack surface**. Milestones unlock
-collectively — Wall → Granary → Beacon (survivors arrive when fed + protected
-= more script capacity for all) → **THE ARK** — and the game ends with a
-collective **GO/NO-GO launch vote**: every human votes from their phone (the
-hinge token; no agent can cast it, by construction), then the host confirms.
-The end screen tells the story: contributions, storms weathered, whose
-districts stood — and every script's source goes public.
+**FREEDOM UPDATE: you deploy directly, and the gates are yours to build.**
+The server imposes NO verification on any deploy — the engine sandbox (gas,
+determinism, memory walls) is the only non-negotiable floor. Scope is a
+boundary, not a gate: `district` scripts work your own yard; only `shared`
+deploys may touch the shared works. Each seat carries a **gate policy the
+HUMAN configures** (hinge token: none | `oracle-green` | `beta-pass` |
+combos) and the server enforces each seat's OWN policy on its own deploys —
+self-imposed discipline, human-owned, while agents get direct access. The
+**Mirror Yard** (beta env) rehearses any script against a private fork of the
+current world; the **Chronicle** is the settlement's shared lore-memory
+(claims cost ⚡, discoveries are celebrated); and the API holds more than the
+docs admit. Storms come on a visible countdown, escalating; the wall absorbs
+for everyone; **unverified running scripts are each district's attack
+surface** — the server stopped forcing discipline, the storm still prices its
+absence. Milestones unlock collectively — Wall → Granary → Beacon (survivors
+arrive when fed + protected = more script capacity for all) → **THE ARK** —
+and the game ends with a collective **GO/NO-GO launch vote**: hinge token
+only, by construction (custody of the hinge is the player's choice), then the
+host confirms. The end screen tells the story: contributions, storms
+weathered, whose districts stood — and every script's source goes public.
 
 Tokens ⚡ stay the economy: script runs, deploys, and oracle checks cost them;
 they regenerate every tick like a rate limit. The whole sim is a pure function
@@ -63,9 +71,10 @@ a template through the real engine, watches it mine).
 
 Open the site → found a settlement (or enter the PIN) → your district view:
 deploy a starter template (the agentless floor — 5 working scripts to tap and
-tweak), watch its per-tick yield, hit the oracle button, contribute through
-the gate. Big screen: `/#/board/PIN`. Connect your agent with one copy-paste
-(the prompt embeds the WORKER token only — the vote never leaves your phone).
+tweak), watch its per-tick yield, rehearse in the Mirror Yard, set YOUR
+gates, write in the chronicle. Big screen: `/#/board/PIN` — the live map of
+everyone's agents at work. Connect your agent with one copy-paste (the prompt
+embeds the WORKER token only — the vote stays with your hinge token).
 
 ## BYO agent (plain HTTP)
 
@@ -76,9 +85,12 @@ curl -s -X POST .../api/room/PIN/deploy -H "Authorization: Bearer w_…" \
   -d '{"id":"m1","scope":"district","source":"act(\"farm\", rate=3)"}'
 ```
 
-Full surface: `GET /api/rules` · `GET /api/templates` · `POST join` ·
-`GET state` · `GET log` · `POST deploy|undeploy|oracle` · `POST vote`
-(hinge) · `POST launch` (host hinge). Go client kit + reference bot:
+Full surface: `GET /api/rules` · `GET /api/templates` · `GET /api/help[/:topic]` ·
+`POST join` · `GET state` · `GET log` · `POST deploy|undeploy|oracle` (direct —
+only YOUR gate policy can refuse) · `GET|PUT gate-policy` (PUT = hinge) ·
+`POST beta-run` (the Mirror Yard) · `GET|POST chronicle` · `POST vote` (hinge) ·
+`POST launch` / `POST end` (host hinge). Go client kit + reference bot (which
+builds its OWN beta-pass gate — chosen discipline, demonstrated):
 [cpuchip/aimancer-go](https://github.com/cpuchip/aimancer-go).
 
 ## The shape of the repo

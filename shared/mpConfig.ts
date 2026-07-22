@@ -10,8 +10,12 @@ export const TICK_MS_DEFAULT = 5_000
 export const TICK_MS_MIN = 250 // fast enough for wstest, still a real interval
 export const TICK_MS_MAX = 60_000
 
-/** PIN alphabet — no I/O, read-aloud friendly (chips' CODE_ALPHABET). */
-export const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+/** PIN alphabet — NO VOWELS AT ALL (a/e/i/o/u/y dropped; ruled 2026-07-22):
+ * profanity-proof AND misread-proof. 20 letters, 160k codes. Lore consequence
+ * (the clipped tongue): no true settlement name can ever be DRAWN — the old
+ * canon names are structurally retired, and a name can only be EARNED (the
+ * Rite of Naming — a future content drop sets Room.displayName). */
+export const CODE_ALPHABET = 'BCDFGHJKLMNPQRSTVWXZ'
 export const CODE_LENGTH = 4
 
 /** Deterministic seed from a room code — same room code → same world.
