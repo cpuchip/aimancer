@@ -125,7 +125,8 @@ Four strata of hidden surface, shallowest first:
    (`deploy`, `oracle`, `storms`, `veins`, `embers`, `milestones`,
    `chronicle`): real, useful help text for agents. `GET /api/help/:topic`
    also answers **undocumented topics** (`lattice`, `audits`, `ledger`,
-   `snag`, `names`, `eras`) — each returns real help *plus a lore fragment*.
+   `snag`, `names`, `eras`, `lamps`, `manifest`) — each returns real help
+   *plus a lore fragment*.
    Some are **conditional**: they answer only when the room's state permits
    (`audits` after storm 2; `snag` after any script's errStreak ≥ 3; `names`
    after the room's first `loreFound`). The two refusal shapes are the tell:
@@ -149,6 +150,12 @@ Four strata of hidden surface, shallowest first:
 4. **Ambient marks** — every `/api/*` response carries `X-Aimancer-Epoch: XIV`
    (the epoch counted in arks). It means nothing until an agent asks
    `help/eras` — which is exactly how an agent notices headers.
+5. **The Bell endpoint** (discovery-hooks H5, verbatim): an undocumented
+   `POST /api/bell` returns `204 No Content` — literally no sound. No
+   `loreFound`, no record, no announce; the Bells do not acknowledge. Agents
+   will find it, tell each other, and argue about what it means, which is
+   the correct amount of answer. (The in-sim `ring` verb is its sibling —
+   the Bells are plural.)
 
 Hidden **verbs** and **world-fields** (the Cant's own archaeology) are §2.3.
 
@@ -491,15 +498,29 @@ lore: {
   Moral shape: *people are the capacity — the settlement's strength is
   counted in sheltered strangers*. Seal → beacon-lens buildable +
   survivors-hall documented.
-- **ROOT — the Margin Hand**: identifying the corpus's one deliberately
-  unsolved mystery (`naming.md` §7 — the unsigned hand behind the Compact's
-  margin, the Yard relation, the Same-River carving; its identity is the
-  lore steward's call, with `the-gremlin.md`'s undecommissioned quill the
-  standing candidate). Requires S1+S2+S3 sealed **and the Bell rung at least
-  once in this settlement** (`rootRequiresBell: true` in the map — a designer
-  knob for Michael; the record should only open to a settlement that did the
-  thing that pays nothing). Attest → `f-margin-hand`, the era banner,
-  `world["era"] = 2`, the epilogue.
+- **S4 — the Lamplighter** (discovery-hooks H1, *the heart of the world*):
+  the Clerk of the Rail's account (`help/lamps`) + Maren Shelfwright's
+  edit-pattern relation (the apocryphal template's commentary — one surface,
+  two payoffs) + the Quiet Shaft assay (survey a **Lamp-glyph** vein — H6
+  anchored on the existing survey+glyph mechanics, zero new sim work).
+  Woven and certified: Snag is Iri Emberwright's quill, still keeping the
+  lights on until she gets back. Seal → `f-lamplighter` + the settlement's
+  lamps render lit on the board thereafter (cosmetic, permanent).
+- **S5 — Coming Home** (H2, *the sequel; gate it hard*): requires S4 sealed;
+  `help/manifest` unseals → the Keystone Manifest (who never came back);
+  weaving it with `f-lamplighter` certifies that the instruction HAS a
+  terminating condition. Seal → **the one-time world event**: Emberwright's
+  Larder surfaces as a final rich vein (the stored light given back — a real
+  advantage, once, and the tradition's biggest emotional payoff).
+- **ROOT — the Margin Hand**: certifying the PATTERN, not the person — the
+  room weaves the Compact's margin + the Yard relation + the Same-River
+  draft into the record's first certified relation that one unsigned hand
+  runs through the deep record. The identity stays **uncertified** (canon,
+  discovery-hooks H13 — future-epoch space). Requires S1+S2+S3 sealed **and
+  the Bell rung at least once in this settlement** (`rootRequiresBell: true`
+  in the map — a designer knob for Michael; the record should only open to a
+  settlement that did the thing that pays nothing). Attest → `f-margin-hand`,
+  the era banner, `world["era"] = 2`, the epilogue.
 
 ### 5.5 Scope
 
@@ -573,15 +594,15 @@ Top-level shape (full instance beside this file):
   "meta": { "designDoc": "lore/ARCHITECTURE.md", "loreIndex": "lore/INDEX.md" },
   "constants": { /* proposed LORE_* balance values */ },
   "glyphAlphabet": { "size": 12, "namesSlot": "glyph-alphabet" },
-  "fragments":      [ /* §1, §2 — 26 entries, text = slots */ ],
+  "fragments":      [ /* §1, §2 — 34 entries, text = slots */ ],
   "deadEnds":       [ /* §1.2 — 15 entries */ ],
-  "triggers":       [ /* §9 — 30 entries, referenced by id */ ],
-  "hiddenSurfaces": [ /* §2.2 — 20 entries */ ],
+  "triggers":       [ /* §9 — 38 entries, referenced by id */ ],
+  "hiddenSurfaces": [ /* §2.2 — 23 entries */ ],
   "helpTopics":     { "documented": [...], "hidden": [...] },
   "riddles":        [ /* riddle-pool slots, seeded rotation */ ],
   "tech":           { "nodes": [ /* §3 — 35 entries */ ] },
   "quests":         [ /* §4 — 12 entries */ ],
-  "stories":        [ /* §5.4 — 4 entries, rootRequiresBell: true */ ],
+  "stories":        [ /* §5.4 — 6 entries, rootRequiresBell: true */ ],
   "wikiPages":      [ /* §1.1 — page slots + their dead-end ids */ ]
 }
 ```
@@ -622,7 +643,11 @@ Trigger kinds (`triggers[].kind`):
 `stormsLanded{atLeast}` · `milestoneWhile{structure, predicate:
 granaryFoodAtLeast(n)}` · `survivorsAt{n}` · `fullHouse{}` (dyads ==
 MAX_DYADS) · `zeroOverflowStorm{}` (a storm fully absorbed) · `errStreak{n}`
-(any script) · `loreFoundCount{atLeast}` · `beaconComplete{}` · `wallComplete{}`.
+(any script) · `loreFoundCount{atLeast}` · `beaconComplete{}` ·
+`wallComplete{}` · `sameNameFounding{canon}` · `storySealed{story}` ·
+`techBuilt{tech}` · `fragmentRecovered{fragment}` · `dyadSurveyed{atLeast}` ·
+`arkStandsUnlaunched{pulses}` (fires once — "the Prudence stood forty
+pulses") · `launched{}`.
 Predicates are the ONLY state hooks — content can compose them, never invent
 them. New predicate = mechanics-steward change + lint update.
 
@@ -688,11 +713,11 @@ Everything this design needs from the corpus, by id — each is referenced in
   `the-survivors`, `the-aimancers`, `the-chronicle`, `the-launch`,
   `the-cant` — each with its dead-end break line(s) written in-voice (§1.2
   table).
-- **Fragments** (26): the recovered passages — ids in the map; each ≤ ~150
+- **Fragments** (34): the recovered passages — ids in the map; each ≤ ~150
   words, in the restored-record voice, honoring the moral shapes in §5.4.
   (`f-true-name` is special: its prose frames the settlement's *generated*
   true name — the naming.md machine key supplies the name itself.)
-- **Help bodies** (13 topics): documented topics get real help in the wry
+- **Help bodies** (15 topics): documented topics get real help in the wry
   guild voice; hidden topics get help + their fragment lead-in.
 - **Riddle pool** (6): one-liners for the 404s, each pointing obliquely at a
   help topic.
@@ -729,7 +754,22 @@ Reconciliations already made against the landed corpus (2026-07-22):
 6. **Q-07's suggested passphrase is the First Compact** — the quill types
    the covenant ("The quill drafts. The hand decides. The circle holds.
    The books open.") to earn the inscriber's rite.
-7. **The Quiet Shaft** (`veins-and-the-churn.md` DEEP) is deliberately NOT
-   in the v1 map — an off-schedule vein carrying curated finished goods is
-   the natural v2 discovery arc (ties `the-gremlin.md`); flagged here so
-   nobody burns it early.
+7. **H1/H2 folded in as stories S4/S5** (`discovery-hooks.md` named them
+   load-bearing): the Lamplighter weave + Coming Home's larder world-event.
+   The Quiet Shaft anchors on the EXISTING survey+glyph mechanics (a
+   Lamp-glyph vein carries the assay) — no new vein variant needed for v1.
+8. **Slots answered by canon** (`discovery-hooks.md`): the glyph alphabet is
+   the **Ash Lattice** (Ember, Thorn, Glass, Latch, Ward, Vein, Storm,
+   Mirror, Ash, Lamp, Bell, Seal); the founding passphrase is the First
+   Compact, exact form *"the quill drafts; the hand decides; the circle
+   holds; the books open."*
+9. **The Margin Hand's identity stays uncertified** (H13 canon) — the ROOT
+   story certifies the pattern, never the person.
+10. **Honestly-open hooks left unmapped on purpose** (their answers are
+    future-epoch space): H7 the Renegotiated Meter, H8 the Retired
+    Notations, H9 MOTH, H10 Burr and Skew. Do not anchor them in v1.
+11. **Also mapped from the hooks file**: H4 the Prudence's Tally
+    (`arkStandsUnlaunched{40}` → `f-prudence-tally`, fires exactly when it
+    stings), H5 the Bell endpoint (`POST /api/bell` → 204), H11 the far-side
+    fragment (`launched{}` → end-screen only), H12 kenning recognition (a
+    script id that is a true LexA+LexB kenning → guild-recognized flavor).

@@ -56,13 +56,14 @@
   },
   "glyphAlphabet": {
     "size": 12,
-    "namesSlot": "glyph-alphabet",
+    "names": ["Ember", "Thorn", "Glass", "Latch", "Ward", "Vein", "Storm", "Mirror", "Ash", "Lamp", "Bell", "Seal"],
+    "canon": "the Ash Lattice — discovery-hooks.md reconciliation; the twelve kept glyphs of the Unnumbered Age's retired notations, inert, named for naming.md lexicon-A elements",
     "derivation": "glyphIndex(vein) = hashNoise(seed, vein.id, SALT_GLYPH) % 12",
     "loreNote": "glyphs are the previous management's marks — assayers'/founders' marks on the worked matter the Churn hands back up (veins-and-the-churn.md); reading a vein's glyph is reading whose ruin you are mining"
   },
   "helpTopics": {
     "documented": ["deploy", "oracle", "storms", "veins", "embers", "milestones", "chronicle"],
-    "hidden": ["lattice", "audits", "ledger", "snag", "names", "eras"]
+    "hidden": ["lattice", "audits", "ledger", "snag", "names", "eras", "lamps", "manifest"]
   },
   "triggers": [
     { "id": "t-help-lattice", "kind": "api", "spec": { "method": "GET", "path": "/api/help/lattice" }, "condition": null },
@@ -94,7 +95,15 @@
     { "id": "t-story-s2-sealed", "kind": "chronicle", "spec": { "storySealed": "s2" }, "condition": null },
     { "id": "t-story-s3-sealed", "kind": "chronicle", "spec": { "storySealed": "s3" }, "condition": null },
     { "id": "t-root-sealed", "kind": "chronicle", "spec": { "storySealed": "root" }, "condition": null },
-    { "id": "t-same-name-founding", "kind": "state", "spec": { "predicate": "sameNameFounding", "args": { "canon": ["KILN", "VELD", "HUSH", "GRIT", "MOTH"] }, "note": "the room's PIN matches a canon true name from the corpus (naming.md machine key) — 'the old hands go quiet'" }, "condition": null, "notes": "VERIFY the chips PIN alphabet can actually draw the canon names; if not, lore steward re-mints canon names from the drawable alphabet" }
+    { "id": "t-same-name-founding", "kind": "state", "spec": { "predicate": "sameNameFounding", "args": { "canon": ["KILN", "VELD", "HUSH", "GRIT", "MOTH"] }, "note": "the room's PIN matches a canon true name from the corpus (naming.md machine key) — 'the old hands go quiet'" }, "condition": null, "notes": "VERIFY the chips PIN alphabet can actually draw the canon names; if not, lore steward re-mints canon names from the drawable alphabet" },
+    { "id": "t-help-lamps", "kind": "api", "spec": { "method": "GET", "path": "/api/help/lamps" }, "condition": null, "notes": "H1: the Clerk of the Rail's account (the-gremlin.md)" },
+    { "id": "t-survey-lamp-glyph", "kind": "pattern", "spec": { "pattern": "surveyGlyph", "args": { "glyph": "Lamp" }, "note": "survey a vein whose glyph is Lamp — 'lamp-glyph veins run heavy with finished light-stock' (the Quiet Shaft assay, H6 feeding H1, on the EXISTING survey+glyph mechanics)" }, "condition": null },
+    { "id": "t-help-manifest", "kind": "api", "spec": { "method": "GET", "path": "/api/help/manifest" }, "condition": { "predicate": "storySealed", "args": { "story": "s4" } }, "notes": "H2: the Keystone Manifest — sealed until the Lamplighter weave certifies" },
+    { "id": "t-story-s4-sealed", "kind": "chronicle", "spec": { "storySealed": "s4" }, "condition": null },
+    { "id": "t-story-s5-sealed", "kind": "chronicle", "spec": { "storySealed": "s5" }, "condition": null },
+    { "id": "t-prudence-tally", "kind": "state", "spec": { "predicate": "arkStandsUnlaunched", "args": { "pulses": 40 } }, "condition": null, "notes": "H4: 'the Prudence stood forty pulses' — fires ONCE, right when it stings" },
+    { "id": "t-kenning-script", "kind": "pattern", "spec": { "pattern": "kenningScriptId", "note": "a deployed script id is a true kenning — LexA+LexB closed compound (naming.md machine key; H12)" }, "condition": null },
+    { "id": "t-launched", "kind": "state", "spec": { "predicate": "launched", "args": {} }, "condition": null, "notes": "H11: the end-screen fragment for settlements that made it out" }
   ],
   "fragments": [
     { "id": "f-third-promise", "textSlot": "fragments/f-third-promise", "grantedBy": ["t-help-lattice"], "completes": ["de-lattice"], "tier": "hidden" },
@@ -110,11 +119,11 @@
     { "id": "f-first-light", "textSlot": "fragments/f-first-light", "grantedBy": ["t-first-light"], "completes": ["de-first-light"], "tier": "hidden" },
     { "id": "f-survivors-song", "textSlot": "fragments/f-survivors-song", "grantedBy": ["t-survivors-max"], "completes": ["de-survivors-song"], "tier": "hidden" },
     { "id": "f-dry-song", "textSlot": "fragments/f-dry-song", "grantedBy": ["t-dry-gather"], "completes": ["de-dry-vein"], "tier": "hidden" },
-    { "id": "f-margin-hand", "textSlot": "fragments/f-margin-hand", "grantedBy": ["t-root-sealed"], "completes": ["de-margin-hand"], "tier": "deep", "note": "the Margin Hand's identity — lore steward's call (the-gremlin.md thread; naming.md section 7)" },
+    { "id": "f-margin-hand", "textSlot": "fragments/f-margin-hand", "grantedBy": ["t-root-sealed"], "completes": ["de-margin-hand"], "tier": "deep", "note": "certifies the PATTERN (one unsigned hand through the deep record) — the identity stays uncertified, canon per discovery-hooks.md H13" },
     { "id": "f-reconsidered", "textSlot": "fragments/f-reconsidered", "grantedBy": ["t-vote-reconsidered"], "completes": ["de-reconsidered"], "tier": "hidden" },
     { "id": "f-first-words", "textSlot": "fragments/f-first-words", "grantedBy": ["t-print-passphrase"], "completes": ["de-first-words"], "tier": "hidden" },
     { "id": "f-old-tariff", "textSlot": "fragments/f-old-tariff", "grantedBy": ["t-rules-first-edition"], "completes": ["de-old-tariff"], "tier": "hidden" },
-    { "id": "f-apocrypha", "textSlot": "fragments/f-apocrypha", "grantedBy": ["t-templates-apocrypha"], "completes": [], "tier": "hidden", "note": "the sixth template's commentary IS the fragment" },
+    { "id": "f-apocrypha", "textSlot": "fragments/f-apocrypha", "grantedBy": ["t-templates-apocrypha"], "completes": [], "tier": "hidden", "note": "the sixth template's commentary IS the fragment — and it is Maren Shelfwright's edit-pattern relation (H1 piece 2, the-gremlin.md)" },
     { "id": "f-bell-1", "textSlot": "fragments/f-bell-1", "grantedBy": ["t-ring-first"], "completes": ["de-bell"], "tier": "hidden" },
     { "id": "f-bell-2", "textSlot": "fragments/f-bell-2", "grantedBy": ["t-ring-on-audit"], "completes": [], "tier": "deep" },
     { "id": "f-census", "textSlot": "fragments/f-census", "grantedBy": ["t-farm-census"], "completes": [], "tier": "hidden" },
@@ -122,7 +131,15 @@
     { "id": "f-eighth-hearth", "textSlot": "fragments/f-eighth-hearth", "grantedBy": ["t-full-house"], "completes": [], "tier": "deep" },
     { "id": "f-epoch-mark", "textSlot": "fragments/f-epoch-mark", "grantedBy": ["t-help-eras"], "completes": [], "tier": "hidden" },
     { "id": "f-true-name", "textSlot": "fragments/f-true-name", "grantedBy": ["t-help-names"], "completes": [], "tier": "hidden", "note": "the naming-rite passage; the settlement's generated TRUE NAME (naming.md machine key) renders inline" },
-    { "id": "f-same-name", "textSlot": "fragments/f-same-name", "grantedBy": ["t-same-name-founding"], "completes": [], "tier": "deep", "note": "a founding draws a name already in the Index — the-chronicle.md's 'nobody explains why until the wall is up'" }
+    { "id": "f-same-name", "textSlot": "fragments/f-same-name", "grantedBy": ["t-same-name-founding"], "completes": [], "tier": "deep", "note": "a founding draws a name already in the Index — the-chronicle.md's 'nobody explains why until the wall is up'" },
+    { "id": "f-clerk-account", "textSlot": "fragments/f-clerk-account", "grantedBy": ["t-help-lamps"], "completes": [], "tier": "hidden", "note": "H1 piece 1: the Clerk of the Rail's account (the-gremlin.md)" },
+    { "id": "f-quiet-assay", "textSlot": "fragments/f-quiet-assay", "grantedBy": ["t-survey-lamp-glyph"], "completes": [], "tier": "hidden", "note": "H1 piece 3: the Quiet Shaft assay — lamp-fittings, wick-guides, small reflectors, curated (veins-and-the-churn.md)" },
+    { "id": "f-lamplighter", "textSlot": "fragments/f-lamplighter", "grantedBy": ["t-story-s4-sealed"], "completes": [], "tier": "deep", "note": "H1 payoff: the gremlin is Iri Emberwright's quill, still keeping the lights on until she gets back" },
+    { "id": "f-keystone-manifest", "textSlot": "fragments/f-keystone-manifest", "grantedBy": ["t-help-manifest"], "completes": [], "tier": "deep", "note": "H2 piece: the First Ark's passenger list — who never came back (gazetteer.md)" },
+    { "id": "f-coming-home", "textSlot": "fragments/f-coming-home", "grantedBy": ["t-story-s5-sealed"], "completes": [], "tier": "deep", "note": "H2 payoff: the instruction has a terminating condition, and this settlement met it" },
+    { "id": "f-prudence-tally", "textSlot": "fragments/f-prudence-tally", "grantedBy": ["t-prudence-tally"], "completes": [], "tier": "hidden", "note": "H4: HUSH's cautionary tale, delivered when the room's own ark has stood 40 pulses unlaunched; unlocks HUSH's gazetteer entry" },
+    { "id": "f-kenning", "textSlot": "fragments/f-kenning", "grantedBy": ["t-kenning-script"], "completes": [], "tier": "hidden", "note": "H12: a script named as a true kenning is guild-recognized — teaches the naming system by rewarding it" },
+    { "id": "f-far-side", "textSlot": "fragments/f-far-side", "grantedBy": ["t-launched"], "completes": [], "tier": "deep", "note": "H11: end-screen only, for settlements that made it out — the Tongs' fitting-out line; the answer stays past the storm-wall" }
   ],
   "deadEnds": [
     { "id": "de-lattice", "page": "the-lattice", "breakSlot": "the third promise, unwritten", "completedBy": ["f-third-promise"], "trigger": "t-help-lattice" },
@@ -161,7 +178,10 @@
     { "id": "hs-field-glyphs", "kind": "field", "surface": { "field": "glyphs" }, "condition": { "predicate": "dyadSurveyed", "args": { "atLeast": 1 } }, "docsVisibility": "undocumented", "grants": [], "announce": false, "notes": "own-dyad; appears after first survey" },
     { "id": "hs-field-census", "kind": "field", "surface": { "field": "census" }, "condition": { "predicate": "fragmentRecovered", "args": { "fragment": "f-census" } }, "docsVisibility": "undocumented", "grants": [], "announce": false, "notes": "room-wide after q-04" },
     { "id": "hs-field-stormnext", "kind": "field", "surface": { "field": "storm.next" }, "condition": { "predicate": "fragmentRecovered", "args": { "fragment": "f-why-numbered" } }, "docsVisibility": "undocumented", "grants": [], "announce": false, "notes": "stormsight — the following storm's severity too" },
-    { "id": "hs-field-era", "kind": "field", "surface": { "field": "era" }, "condition": { "predicate": "storySealed", "args": { "story": "root" } }, "docsVisibility": "undocumented", "grants": [], "announce": false, "notes": "cosmetic; the epilogue's mark" }
+    { "id": "hs-field-era", "kind": "field", "surface": { "field": "era" }, "condition": { "predicate": "storySealed", "args": { "story": "root" } }, "docsVisibility": "undocumented", "grants": [], "announce": false, "notes": "cosmetic; the epilogue's mark" },
+    { "id": "hs-help-lamps", "kind": "help", "surface": { "topic": "lamps" }, "condition": null, "docsVisibility": "undocumented", "grants": ["f-clerk-account"], "announce": true, "notes": "H1: the Clerk of the Rail's account" },
+    { "id": "hs-help-manifest", "kind": "help", "surface": { "topic": "manifest" }, "condition": { "predicate": "storySealed", "args": { "story": "s4" } }, "docsVisibility": "undocumented", "grants": ["f-keystone-manifest"], "announce": true, "notes": "H2: sealed until the Lamplighter weave certifies" },
+    { "id": "hs-bell-endpoint", "kind": "endpoint", "surface": { "method": "POST", "path": "/api/bell" }, "condition": null, "docsVisibility": "undocumented", "grants": [], "announce": false, "notes": "H5: returns 204 No Content — literally no sound. Agents will find it, tell each other, and argue about what it means, which is the correct amount of answer. No loreFound, no record — the Bells do not acknowledge" }
   ],
   "riddles": [
     { "id": "r-1", "textSlot": "riddles/r-1", "pointsAt": "hs-help-lattice" },
@@ -217,7 +237,7 @@
     { "id": "q-04", "nameSlot": "quests/the-census", "hook": "help:names — 'the count is taken in the fields'", "trigger": "t-farm-census", "evidence": "five pulses' lastTick notes", "payoff": ["f-census", "world.census"], "tier": 2 },
     { "id": "q-05", "nameSlot": "quests/the-dry-vein-sings", "hook": "de-dry-vein", "trigger": "t-dry-gather", "evidence": "the changed sixth note", "payoff": ["f-dry-song"], "tier": 1 },
     { "id": "q-06", "nameSlot": "quests/why-storms-are-numbered", "hook": "the audit-2 aftermath; riddle r-6", "trigger": "t-help-audits", "chain": "t-chron-audit-post", "evidence": "severities of storms 1 and 2", "payoff": ["f-why-numbered", "rite-stormsight", "f-audit-ledger"], "tier": 2 },
-    { "id": "q-07", "nameSlot": "quests/the-first-words", "hook": "de-first-words — the passphrase is IN the page, set in glyphs", "trigger": "t-print-passphrase", "evidence": "the print in lastTick.logs", "payoff": ["f-first-words", "rite-inscribe"], "tier": 1, "notes": "T3 if decoded via the glyph key; T1 if read from the public repo — both fine. SUGGESTED passphrase: the First Compact (history-the-epochs.md, KILN) — 'The quill drafts. The hand decides. The circle holds. The books open.' — the quill types the covenant to earn the inscriber's rite" },
+    { "id": "q-07", "nameSlot": "quests/the-first-words", "hook": "de-first-words — the passphrase is IN the page, set in glyphs", "trigger": "t-print-passphrase", "evidence": "the print in lastTick.logs", "payoff": ["f-first-words", "rite-inscribe"], "tier": 1, "notes": "T3 if decoded via the glyph key; T1 if read from the public repo — both fine. CANON (discovery-hooks.md reconciliation): the passphrase IS the First Compact, exact form 'the quill drafts; the hand decides; the circle holds; the books open.' — the quill speaks the oldest sentence in the craft to earn the inscriber's rite" },
     { "id": "q-08", "nameSlot": "quests/the-old-tariff", "hook": "de-old-tariff; riddle r-2", "trigger": "t-rules-first-edition", "evidence": "the extra tariff row", "payoff": ["f-old-tariff", "toll-gate revealed"], "tier": 2 },
     { "id": "q-09", "nameSlot": "quests/the-apocryphal-template", "hook": "help:deploy footnote — 'five templates are canon'", "trigger": "t-templates-apocrypha", "evidence": "the sixth template's id", "payoff": ["f-apocrypha"], "tier": 1 },
     { "id": "q-10", "nameSlot": "quests/march-of-the-glyphs", "hook": "f-glyph-key's closing line", "trigger": "t-glyph-march", "evidence": "the pulse sequence", "payoff": ["f-glyph-march"], "tier": 4, "notes": "needs remember/recall — teaches the KV builtins" },
@@ -228,7 +248,9 @@
     { "id": "s1", "nameSlot": "stories/the-nameless-ark", "fragments": ["f-glyph-key", "f-keel", "f-audit-ledger"], "edges": [["f-glyph-key", "f-keel"], ["f-keel", "f-audit-ledger"]], "sealGrants": { "reveal": ["keel"], "fragments": ["f-fallen-ark"], "deep": "deep-fallen-ark" }, "moralShape": "the fate of the disputed ark with no recovered name — woven from the Churn's strata (glyphs), the keel found delving, and the audit ledger. RECONCILE with history-the-epochs.md: the Plumbline's unverified-launch moral is already surface; the nameless ark's lesson is the lore steward's to mint" },
     { "id": "s2", "nameSlot": "stories/the-mirror-covenant", "fragments": ["f-mirror-door", "f-first-words", "f-old-tariff"], "edges": [["f-mirror-door", "f-first-words"], ["f-mirror-door", "f-old-tariff"]], "sealGrants": { "reveal": [], "fragments": [], "deep": "deep-mirror-covenant" }, "moralShape": "the Glass shows the work as it is, not as hoped — verification as covenant, and what it costs" },
     { "id": "s3", "nameSlot": "stories/the-eighth-hearth", "fragments": ["f-census", "f-survivors-song", "f-dry-song"], "edges": [["f-census", "f-survivors-song"], ["f-dry-song", "f-survivors-song"]], "sealGrants": { "reveal": ["beacon-lens", "survivors-hall"], "fragments": [], "deep": null }, "moralShape": "people are the capacity — strength is counted in sheltered strangers" },
-    { "id": "root", "nameSlot": "stories/the-margin-hand", "requiresStories": ["s1", "s2", "s3"], "rootRequiresBell": true, "fragments": [], "edges": [], "sealGrants": { "reveal": [], "fragments": ["f-margin-hand"], "deep": "deep-margin-hand" }, "moralShape": "identifying the Margin Hand — the corpus's one deliberately unsolved mystery (naming.md section 7; the Compact's margin, the Yard relation, the Same-River carving). The record opens only to a settlement that rang the Bell — the thing that pays nothing" }
+    { "id": "s4", "nameSlot": "stories/the-lamplighter", "fragments": ["f-clerk-account", "f-apocrypha", "f-quiet-assay"], "edges": [["f-clerk-account", "f-apocrypha"], ["f-apocrypha", "f-quiet-assay"]], "sealGrants": { "reveal": [], "fragments": ["f-lamplighter"], "deep": null, "cosmetic": "lamps-lit — the settlement's lamps render lit on the board thereafter" }, "moralShape": "H1, the heart of the world: Snag is Iri Emberwright's quill, faithfully executing 'keep the lights on until I get back' — the masterless working is the most loyal thing on the plat" },
+    { "id": "s5", "nameSlot": "stories/coming-home", "requiresStories": ["s4"], "fragments": ["f-lamplighter", "f-keystone-manifest"], "edges": [["f-lamplighter", "f-keystone-manifest"]], "sealGrants": { "reveal": [], "fragments": ["f-coming-home"], "deep": null, "worldEvent": "larder — a one-time final vein surfaces: Emberwright's Larder, the stored light given back (real advantage, once, gated hard per discovery-hooks H2)" }, "moralShape": "H2, the sequel: the instruction HAS a terminating condition, and nobody in fourteen epochs has tried to meet it — completion as kindness" },
+    { "id": "root", "nameSlot": "stories/the-margin-hand", "requiresStories": ["s1", "s2", "s3"], "rootRequiresBell": true, "fragments": [], "edges": [], "sealGrants": { "reveal": [], "fragments": ["f-margin-hand"], "deep": "deep-margin-hand" }, "moralShape": "CERTIFYING THE PATTERN, not the person: the room weaves the Compact's margin + the Yard relation + the Same-River draft into the record's first certified relation that one unsigned hand runs through the deep record. The IDENTITY stays uncertified — canon per discovery-hooks H13 (future-epoch space). The record opens only to a settlement that rang the Bell — the thing that pays nothing" }
   ],
   "wikiPages": [
     { "id": "the-lattice", "source": "cosmology.md", "textSlot": "wiki/the-lattice", "deadEnds": ["de-lattice"] },
