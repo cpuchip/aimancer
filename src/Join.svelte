@@ -165,6 +165,11 @@
     if (r.status !== 200) say(String(r.json['error']))
   }
 
+  async function startWorld(): Promise<void> {
+    const r = await api('start', hingeToken, {})
+    if (r.status !== 200) say(String(r.json['error']))
+  }
+
   async function copyAgentPrompt(): Promise<void> {
     const res = await fetch(`/api/room/${roomPin}/agent-prompt?token=${workerToken}`)
     if (!res.ok) return say('could not fetch the prompt')
@@ -229,11 +234,24 @@
       <span class="muted num">tick {view.tick}</span>
     </div>
 
+    {#if view.phase === 'gathering'}
+      <!-- GATHERING — the world holds still until the host rings the bell -->
+      <div class="card vote-panel" style="text-align:center">
+        <b>🔔 GATHERING — the world is frozen</b>
+        <p class="muted" style="margin:var(--s-1) 0">seat up, connect your agent, arm your scripts — they hold until the world runs. No ticks, no storms, no ⚡ regen yet.</p>
+        {#if isHost}
+          <button class="primary" style="width:100%; font-size:var(--t-lg)" onclick={startWorld}>🔔 START THE WORLD ({view.dyads.length} dyad{view.dyads.length === 1 ? '' : 's'} seated)</button>
+        {:else}
+          <p style="margin:0"><b>waiting for the host to call it…</b></p>
+        {/if}
+      </div>
+    {/if}
+
     <!-- THE STORM COUNTDOWN — nobody negotiates with it -->
     <div class="storm-banner storm-{urgency}">
       <span class="storm-icon">🌩</span>
       <b>STORM {view.storm.index}</b>
-      <span class="num">{view.storm.inTicks} ticks{stormClockMs !== null ? ` · ${fmtClock(stormClockMs)}` : ''} · severity {view.storm.severity}</span>
+      <span class="num">{view.phase === 'gathering' ? `${view.storm.inTicks} ticks after the start` : `${view.storm.inTicks} ticks${stormClockMs !== null ? ` · ${fmtClock(stormClockMs)}` : ''}`} · severity {view.storm.severity}</span>
       <span class="muted">wall {view.structures.wall.hp}/{view.structures.wall.hpMax} HP</span>
     </div>
 

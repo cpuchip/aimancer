@@ -46,6 +46,7 @@ export function describeEvent(e: SimEvent, nameOf: (i: number) => string): strin
     case 'veinSpawned': return `⛏ a NEW VEIN surfaced — vein #${e.id} (rate ${e.rate}, ${e.reserve} ore)`
     case 'veinExhausted': return `🪨 vein #${e.id} ran DRY — miners there are idling`
     case 'voteCast': return e.go ? `🚀 ${nameOf(e.dyad)} votes GO` : `🛑 ${nameOf(e.dyad)} votes NO-GO`
+    case 'started': return `🔔 THE HOST CALLED IT — the world runs, the storm clock is live. Build.`
     case 'launch': return `🚀🚀🚀 LAUNCH — ${e.goVotes} of ${e.dyads} dyads said GO. The ark rises.`
     case 'ended': return `🌙 the host called the game — the settlement rests, the books open`
     case 'chronicle':
@@ -62,5 +63,5 @@ export function isDisaster(e: SimEvent): boolean {
 
 /** The board celebrates these. */
 export function isTriumph(e: SimEvent): boolean {
-  return e.t === 'milestone' || e.t === 'launch' || e.t === 'survivorArrived' || (e.t === 'chronicle' && e.kind === 'discovery')
+  return e.t === 'milestone' || e.t === 'launch' || e.t === 'started' || e.t === 'survivorArrived' || (e.t === 'chronicle' && e.kind === 'discovery')
 }

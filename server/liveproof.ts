@@ -53,9 +53,15 @@ async function main(): Promise<void> {
   const hinge = created.json['hingeToken'] as string
   console.log(`  probe settlement ${pin}`)
 
+  // THE OPENING BELL, live: a fresh room GATHERS at tick 0 (2+ tick-lengths)
+  await new Promise((r) => setTimeout(r, 2300))
+  const frozen = (await api(`/api/room/${pin}/state`, { token: worker })).json['view'] as RoomView
+  ok(frozen.phase === 'gathering' && frozen.tick === 0, 'OPENING BELL live: fresh room holds at tick 0 while gathering (2+ tick-lengths)')
+  ok((await api(`/api/room/${pin}/start`, { token: worker, body: {} })).status === 403, 'OPENING BELL live: worker-token start → 403')
+
   const miner = TEMPLATES.find((t) => t.id === 'miner')!
   const dep = await api(`/api/room/${pin}/deploy`, { token: worker, body: { id: 'probe', scope: 'district', source: miner.source } })
-  ok(dep.status === 200, 'template deployed over HTTP')
+  ok(dep.status === 200, 'template deployed over HTTP (arms while gathering)')
 
   // FREEDOM, live: a shared deploy is DIRECT under the default policy…
   const direct = await api(`/api/room/${pin}/deploy`, { token: worker, body: { id: 'red', scope: 'shared', source: 'act("blastoff")' } })
@@ -84,7 +90,8 @@ async function main(): Promise<void> {
   ok((await api(`/api/room/${pin}/vote`, { token: worker, body: { go: true } })).status === 403, 'vote with worker token → 403 (hinge is structural, live)')
   ok((await api(`/api/room/${pin}/vote`, { token: hinge, body: { go: true } })).status === 409, 'hinge vote reaches the sim (ark not built)')
 
-  // watch the ENGINE actually run the script
+  // the host rings the bell, then watch the ENGINE actually run the script
+  ok((await api(`/api/room/${pin}/start`, { token: hinge, body: {} })).status === 200, 'OPENING BELL live: host hinge starts the world')
   let mined: RoomView | null = null
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 700))

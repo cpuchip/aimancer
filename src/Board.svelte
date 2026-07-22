@@ -108,6 +108,24 @@
       </tbody>
     </table>
     <p class="muted" style="text-align:center">the books are open — every script source is public in the room log · same PIN = same world, run it back</p>
+  {:else if view && view.phase === 'gathering'}
+    <!-- GATHERING — the join-teaching screen: the room reads THIS while seats fill -->
+    <div class="card lobby-hero" style="text-align:center; padding:var(--s-7)">
+      <img class="lobby-emblem" src="/assets/emblem.png" alt="" />
+      <p class="muted" style="font-size:var(--t-xl); margin:0">join at <b style="color:var(--ink)">{location.host}</b> · PIN</p>
+      <div style="font-size:var(--t-3xl); font-weight:700; letter-spacing:0.3em">{pin}</div>
+      <div class="stack" style="gap:var(--s-2); max-width:560px; margin:var(--s-4) auto 0; text-align:left">
+        <div>1️⃣ open <b>{location.host}</b> on your phone and JOIN with the PIN — you and your AI are one <b>dyad</b>, one district</div>
+        <div>2️⃣ tap <b>connect your agent</b> and paste the prompt into YOUR agent (Claude Code / codex / copilot) — or play from the templates, no agent needed</div>
+        <div>3️⃣ write and deploy scripts NOW — they arm quietly and hold; read the rules at <b>/wiki</b></div>
+      </div>
+      <p style="font-size:var(--t-lg); margin-top:var(--s-4)"><b>🔔 the world begins when the host calls it</b></p>
+      {#if view.dyads.length > 0}
+        <p class="muted">seated: {view.dyads.map((d) => d.name).join(' · ')}</p>
+      {:else}
+        <p class="muted">nobody home yet — the first phone in founds the settlement</p>
+      {/if}
+    </div>
   {:else}
     <!-- THE STORM BANNER — the whole room watches this number -->
     <div class="storm-banner storm-{urgency}" style="font-size:var(--t-xl)">

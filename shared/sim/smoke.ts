@@ -84,26 +84,44 @@ function dep(s: SimState, p: number, id: string, scope: 'district' | 'shared', v
 function stk(s: SimState, p: number, id: string, actions: Action[], extra: { err?: string; starved?: boolean } = {}): void {
   apply(s, { t: 'scriptTick', player: p, id, actions, gasUsed: 10, ...extra })
 }
-/** A game with n dyads joined at tick 0. */
+/** A game with n dyads joined at tick 0 and the host bell already rung
+ * (most floors test the RUNNING world; section 1 tests the gathering gate). */
 function game(n = 2, seed = 7): SimState {
   const s = newGame(seed)
   for (let i = 0; i < n; i++) join(s, `D${i + 1}`)
+  apply(s, { t: 'start' })
   return s
 }
 function evTypes(s: SimState): string[] {
   return s.events.map((e) => e.t)
 }
 
-// ── 1. Drop-in joins: districts in order, full refusal, join-after-launch ───
+// ── 1. GATHERING + the opening bell, then drop-in joins ─────────────────────
 {
   const s = newGame(11)
   ok(s.dyads.length === 0, 'settlement starts empty')
+  ok(!s.started, 'a settlement is founded GATHERING (the world holds still)')
   ok(!ticksRunning(s), 'no ticks before the first dyad')
+  throws(() => apply(s, { t: 'start' }), 'the bell refuses an empty settlement')
   join(s, 'Ada')
-  ok(ticksRunning(s), 'ticks run once a dyad is seated')
   ok(s.dyads[0].district === 0, 'first dyad claims district 0')
   ok(s.dyads[0].tokens === TOKEN_START, 'opening tokens')
   ok(s.dyads[0].integrity === DISTRICT_INTEGRITY_MAX, 'opening integrity')
+  // THE GATE: a seated dyad alone does NOT start the world
+  ok(!ticksRunning(s), 'GATHERING: seated dyads do not start the world')
+  tick(s)
+  ok(s.tick === 0, 'ticks are no-ops while gathering')
+  ok(s.dyads[0].tokens === TOKEN_START, 'no ⚡ regen while gathering')
+  // deploys ARM while gathering (friendly: everyone readies before the bell)
+  apply(s, { t: 'deploy', player: 0, id: 'early', name: 'early', source: SRC, scope: 'district', verified: false })
+  ok(s.dyads[0].scripts[0]?.status === 'running', 'deploys ARM while gathering (no ticks run them yet)')
+  apply(s, { t: 'undeploy', player: 0, id: 'early' })
+  s.dyads[0].tokens = TOKEN_START // restore for the drop-in checks below
+  // THE OPENING BELL: host start is a logged command; the world begins
+  apply(s, { t: 'start' })
+  ok(s.started && ticksRunning(s), 'the host bell starts the world')
+  ok(evTypes(s).includes('started'), 'the bell is announced')
+  throws(() => apply(s, { t: 'start' }), 'no double start')
   tick(s)
   tick(s)
   join(s, 'Bob') // MID-GAME drop-in
@@ -408,7 +426,8 @@ function evTypes(s: SimState): string[] {
     log.push({ atTick: live.tick, cmd: c })
   }
   cmd({ t: 'joinDistrict', name: 'Ada' })
-  cmd({ t: 'deploy', player: 0, id: 'm', name: 'miner', source: SRC, scope: 'district', verified: false })
+  cmd({ t: 'deploy', player: 0, id: 'm', name: 'miner', source: SRC, scope: 'district', verified: false }) // armed while gathering
+  cmd({ t: 'start' }) // the bell is replay data
   for (let i = 0; i < 30; i++) {
     const vein = live.veins.find((v) => v.reserve > 0)
     if (vein && live.dyads[0].tokens >= SCRIPT_RUN_COST) {
@@ -429,6 +448,8 @@ function evTypes(s: SimState): string[] {
   const w2 = newGame(seed)
   join(w1, 'x')
   join(w2, 'x')
+  apply(w1, { t: 'start' })
+  apply(w2, { t: 'start' })
   for (let i = 0; i < 60; i++) {
     tick(w1)
     tick(w2)
@@ -494,6 +515,9 @@ function evTypes(s: SimState): string[] {
     ['host end', 'end the game early'],
     ['hinge custody', 'handed, not taken'],
     ['vote words', 'GO/NO-GO'],
+    ['gathering words', 'founded **GATHERING**'],
+    ['the opening bell', 'HOST calls the start'],
+    ['start route', 'POST /api/room/PIN/start'],
     ['veins initial', `${VEINS_INITIAL} at settlement founding`],
   ] as const) {
     ok(md.includes(needle), `rules carry ${label}`)
@@ -605,6 +629,11 @@ function evTypes(s: SimState): string[] {
   apply(s2, { t: 'vote', player: 0, go: true })
   apply(s2, { t: 'launch' })
   ok(s2.launched && !s2.endedEarly, 'a real launch is not flagged early')
+  // the host may call the game from GATHERING — never-started rooms end clean
+  const g = newGame(8)
+  join(g, 'Founder')
+  apply(g, { t: 'end' })
+  ok(g.launched && g.endedEarly && !g.started, 'HOST END works from GATHERING (a never-started room ends cleanly)')
 }
 
 // ── 19. REPLAY IDENTITY with the freedom commands in the log ────────────────
@@ -618,8 +647,9 @@ function evTypes(s: SimState): string[] {
   }
   cmd({ t: 'joinDistrict', name: 'Ada' })
   cmd({ t: 'deploy', player: 0, id: 'free', name: 'free', source: SRC, scope: 'shared', verified: false }) // FREEDOM: unverified shared, logged
-  cmd({ t: 'chronicle', player: 0, text: 'founding note: the wall comes first' })
-  cmd({ t: 'spend', player: 0, amount: BETA_RUN_COST, reason: 'beta-run' })
+  cmd({ t: 'chronicle', player: 0, text: 'founding note: the wall comes first' }) // gathering: the book is open pre-bell
+  cmd({ t: 'spend', player: 0, amount: BETA_RUN_COST, reason: 'beta-run' }) // gathering: the yard rehearses pre-bell
+  cmd({ t: 'start' })
   for (let i = 0; i < 12; i++) {
     if (live.dyads[0].tokens >= SCRIPT_RUN_COST) {
       cmd({ t: 'scriptTick', player: 0, id: 'free', actions: [{ type: 'farm', rate: 2 }, { type: 'contribute', structure: 'wall', amount: 1 }], gasUsed: 9 })
@@ -629,9 +659,10 @@ function evTypes(s: SimState): string[] {
   }
   cmd({ t: 'end' })
   const replayed = replay(seed, log, live.tick)
-  ok(stateHash(replayed) === stateHash(live), 'REPLAY IDENTITY holds with chronicle/spend/unverified-shared/end in the log')
-  ok(snap(replayed) === snap(live), 'byte-identical snapshots (chronicle included in snap)')
+  ok(stateHash(replayed) === stateHash(live), 'REPLAY IDENTITY holds with start/chronicle/spend/unverified-shared/end in the log')
+  ok(snap(replayed) === snap(live), 'byte-identical snapshots (started + chronicle included in snap)')
   ok(replayed.chronicle.length === 2 && replayed.endedEarly, 'replays carry the chronicle and the early end')
+  ok(replayed.started, 'replays carry the opening bell')
 }
 
 // ── 20. GATE POLICY module: normalize + describe (the shared validator) ─────

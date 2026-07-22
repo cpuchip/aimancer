@@ -65,7 +65,9 @@ export function rulesSections(): RuleSection[] {
     {
       id: 'the-game',
       title: 'The game',
-      body: `AIMANCER is a co-op settlement racing an apocalypse. One shared settlement per room; **drop in anytime** — no rounds, no phases, no late penalty. Each player is a **dyad**: a human plus their AI agent. The dyad claims a **district**, and its agent writes REAL scripts (Starlark — Python syntax) that run every world tick: gather ore from veins, farm food, craft ark parts, contribute to the shared works.
+      body: `AIMANCER is a co-op settlement racing an apocalypse. One shared settlement per room; **drop in anytime** — no rounds, no late penalty. Each player is a **dyad**: a human plus their AI agent. The dyad claims a **district**, and its agent writes REAL scripts (Starlark — Python syntax) that run every world tick: gather ore from veins, farm food, craft ark parts, contribute to the shared works.
+
+A settlement is founded **GATHERING**: everyone joins, agents connect, scripts can be deployed and rehearsed — but the world is FROZEN (no ticks, no storms, no ⚡ regen) until the **HOST calls the start** (the opening bell; \`state.phase\` reads \`gathering\` → \`running\` → \`ended\`). Deploys made while gathering simply hold until the bell. Dropping in AFTER the start is unchanged — the gate is only the opening bell.
 
 Storms come on a **visible countdown**, escalating. The wall absorbs for everyone. Milestones unlock collectively — **Wall → Granary → Beacon → THE ARK** — and the game ends with a collective **GO/NO-GO launch vote**. Up to ${MAX_DYADS} dyads; the world ticks every ~${TICK_MS_DEFAULT / 1000}s.`,
     },
@@ -191,8 +193,9 @@ POST /api/room/PIN/beta-run       {"script":"...","scope":"district","ticks":3} 
 GET  /api/room/PIN/chronicle      (?q=&author=)              → the shared memory (public)
 POST /api/room/PIN/chronicle      {"text":"...","evidence":[],"relatesTo":[]}   (${CHRONICLE_COST}⚡, deduped)
 POST /api/room/PIN/vote           {"go":true}                HINGE token only
+POST /api/room/PIN/start                                     HOST hinge only — the opening bell (rooms gather until it)
 POST /api/room/PIN/launch                                    HOST hinge only
-POST /api/room/PIN/end                                       HOST hinge only — call the game early
+POST /api/room/PIN/end                                       HOST hinge only — call the game early (works while gathering too)
 GET  /api/templates                → the starter script library
 GET  /api/rules                    → this document
 GET  /api/help                     → documented help topics (and GET /api/help/TOPIC)

@@ -1,6 +1,10 @@
-// Room registry — ARK PIVOT. Each room owns ONE authoritative settlement sim,
-// CONTINUOUS from creation: no lobby phase, no rounds — dyads drop in anytime
-// (joinDistrict is a logged command, so replays reproduce the join order).
+// Room registry — ARK PIVOT + THE OPENING BELL. Each room owns ONE
+// authoritative settlement sim. A room is founded GATHERING: dyads drop in,
+// connect agents, arm deploys, rehearse — but the world holds still (no
+// ticks, no storms, no regen) until the HOST rings the start (host-hinge, a
+// logged command — replays carry the bell). After the bell, play is
+// CONTINUOUS: no rounds, drop-in joins unchanged (joinDistrict is a logged
+// command, so replays reproduce the join order).
 // Each tick the server runs every deployed script through the shared Go
 // engine subprocess and logs the emitted ACTIONS AS DATA (scriptTick); the
 // sim applies them deterministically. Engine faults = seat faults (that
@@ -166,6 +170,11 @@ export class Room {
       }
       case 'vote': {
         const r = this.tryVote(msg.token, msg.go)
+        if (!r.ok) send(ws, { type: 'error', message: r.error })
+        return
+      }
+      case 'start': {
+        const r = this.tryStart(msg.token)
         if (!r.ok) send(ws, { type: 'error', message: r.error })
         return
       }
@@ -373,6 +382,21 @@ export class Room {
     if (who.role !== 'hinge') return { ok: false, error: 'the LAUNCH VOTE is the human\'s voice — hinge token only', code: 403 }
     const r = this.command({ t: 'vote', player: who.seat, go: go === true })
     if (!r.ok) return { ok: false, error: r.error, code: 409 }
+    return { ok: true }
+  }
+
+  /** THE OPENING BELL: HOST (seat 0) on the hinge starts the world. Until it
+   * rings, the settlement GATHERS — the world is frozen, the doors are open. */
+  tryStart(token: string): { ok: true } | Refusal {
+    const who = this.auth(token)
+    if (!who) return { ok: false, error: 'missing or unknown token', code: 401 }
+    if (who.seat !== 0) return { ok: false, error: 'only the host starts the world', code: 403 }
+    if (who.role !== 'hinge') return { ok: false, error: 'starting the world is a human act — hinge token only', code: 403 }
+    const r = this.command({ t: 'start' })
+    if (!r.ok) return { ok: false, error: r.error, code: 409 }
+    // the first tick lands one full tick-length AFTER the bell, not instantly
+    // (the room may have gathered for minutes — lastTickAt would be stale)
+    this.lastTickAt = Date.now()
     return { ok: true }
   }
 
@@ -665,6 +689,7 @@ export class Room {
       displayName: this.displayName,
       tickMs: this.tickMs,
       tick: s.tick,
+      phase: s.launched ? 'ended' : s.started ? 'running' : 'gathering',
       launched: s.launched,
       endedEarly: s.endedEarly,
       nextTickInMs: ticksRunning(s) ? Math.max(0, this.lastTickAt + this.tickMs - now) : null,

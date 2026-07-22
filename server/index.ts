@@ -25,6 +25,9 @@
 //   POST /api/room/:pin/chronicle     — either token: post a claim (⚡, deduped)
 //   POST /api/room/:pin/vote          — HINGE token ONLY (the human's voice;
 //                                        hinge CUSTODY is the player's choice)
+//   POST /api/room/:pin/start         — HOST HINGE only: THE OPENING BELL —
+//                                        rooms are founded GATHERING (frozen
+//                                        world, open doors) until this lands
 //   POST /api/room/:pin/launch        — HOST HINGE only (majority must stand)
 //   POST /api/room/:pin/end           — HOST HINGE only: call the game (end
 //                                        screen, then teardown after a grace)
@@ -32,8 +35,9 @@
 // token · 403 wrong surface · 404 no room · 405 method · 409 the game said no
 // (including your own gate policy, which also carries `report`).
 // BREAKING vs the pre-pivot API (documented in ROADMAP.md): draft/arm/disarm/
-// scrap/prospect/claim-contract/start/phase/hold are GONE — the ark game has
-// deploy/undeploy/oracle/vote/launch/end instead.
+// scrap/prospect/claim-contract/phase/hold are GONE — the ark game has
+// deploy/undeploy/oracle/vote/start/launch/end instead (start returned with
+// the OPENING BELL: it is the bell, not a round machine).
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { readFileSync, existsSync, readFile } from 'node:fs'
@@ -179,8 +183,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   }
 
   // POST /api/room — create a settlement; the creator is seated as HOST
-  // (seat 0, the launch-confirm hinge) and gets BOTH tokens. The world is
-  // live immediately — continuous play, no start step.
+  // (seat 0, the launch-confirm hinge) and gets BOTH tokens. The room is
+  // founded GATHERING — the world holds still until the host POSTs /start.
   if (url.pathname === '/api/room') {
     if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' })
     let body: { name?: string; tickMs?: number }
@@ -300,7 +304,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   // Anything not on the documented surface: perhaps the API holds more than
   // the docs admit (hidden endpoints answer a seat token in a room that has
   // earned them) — else an honest 404.
-  const KNOWN_ACTIONS = new Set(['state', 'log', 'join', 'agent-prompt', 'deploy', 'undeploy', 'oracle', 'gate-policy', 'beta-run', 'chronicle', 'vote', 'launch', 'end'])
+  const KNOWN_ACTIONS = new Set(['state', 'log', 'join', 'agent-prompt', 'deploy', 'undeploy', 'oracle', 'gate-policy', 'beta-run', 'chronicle', 'vote', 'start', 'launch', 'end'])
   if (!KNOWN_ACTIONS.has(action)) {
     if (req.method === 'GET' && who) {
       const fragment = room.hiddenEndpoint(who.seat, action)
@@ -370,6 +374,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (action === 'vote') {
     if (typeof body.go !== 'boolean') return sendJson(res, 400, { ok: false, error: 'missing go (boolean)' })
     const r = room.tryVote(token, body.go)
+    if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
+    sendJson(res, 200, { ok: true })
+    return
+  }
+
+  // THE OPENING BELL: the host starts the world (rooms are founded gathering)
+  if (action === 'start') {
+    const r = room.tryStart(token)
     if (!r.ok) return sendJson(res, r.code, { ok: false, error: r.error })
     sendJson(res, 200, { ok: true })
     return

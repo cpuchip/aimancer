@@ -113,6 +113,10 @@ export interface RoomView {
   displayName: string | null
   tickMs: number
   tick: number
+  /** The room's life stage: 'gathering' = founded but the world is FROZEN
+   * until the host's start (joins/deploys/rehearsals work; ticks/storms/regen
+   * wait); 'running' = the bell has rung; 'ended' = launch or host end. */
+  phase: 'gathering' | 'running' | 'ended'
   launched: boolean
   /** true = the host called the game (no launch); the end screen says so. */
   endedEarly: boolean
@@ -163,6 +167,7 @@ export type ClientMessage =
   | { type: 'undeploy'; token: string; id: string }
   | { type: 'oracle'; token: string; id: string }
   | { type: 'vote'; token: string; go: boolean } // HINGE token ONLY — the human's voice
+  | { type: 'start'; token: string } // HOST HINGE only — the opening bell
   | { type: 'launch'; token: string } // HOST HINGE only — majority required
   | { type: 'ping' }
 

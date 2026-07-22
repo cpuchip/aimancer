@@ -4,8 +4,9 @@
 // Harness adapted from chips server/wstest.ts (TestClient, taskkill teardown,
 // assertRedacted discipline).
 //
-// Covers: settlement create/join (PIN alphabet), CONTINUOUS play (no start
-// step — the world ticks as soon as a dyad sits), DROP-IN join mid-game,
+// Covers: settlement create/join (PIN alphabet), GATHERING + THE OPENING
+// BELL (rooms hold at tick 0 — deploys arm, nothing ticks — until the HOST
+// hinge starts; worker/non-host starts refused), DROP-IN join mid-game,
 // reconnect-by-key with stable tokens, THE DEPLOY GATE over the wire
 // (unverified shared deploy → 409 + oracle report; district YOLO lands),
 // ENGINE INTEGRATION on the real path (a deployed template gathers real ore;
@@ -218,6 +219,7 @@ async function main(): Promise<void> {
     ok(rulesText.includes('You deploy directly') && rulesText.includes('GO/NO-GO'), '/api/rules carries the FREEDOM ark game')
     ok(rulesText.includes('GATE POLICY') && rulesText.includes('Mirror Yard') && rulesText.includes('Chronicle'), '/api/rules carries gates/beta/chronicle')
     ok(rulesText.includes('gate-policy') && rulesText.includes('beta-run') && rulesText.includes('/end'), '/api/rules API section covers the new routes')
+    ok(rulesText.includes('POST /api/room/PIN/start') && rulesText.includes('GATHERING'), '/api/rules teaches the opening bell + the start route')
     ok(rulesText.includes('more than it admits'), '/api/rules carries the one honest hint')
     ok(rulesText.includes('gather') && rulesText.includes('contribute'), '/api/rules carries the action table')
     ok(!/\b[wh]_[A-Za-z0-9_-]{8,}/.test(rulesText), '/api/rules carries no token material')
@@ -236,7 +238,8 @@ async function main(): Promise<void> {
     ok(alice.welcome!.isHost && alice.welcome!.index === 0, 'creator seated as host (seat 0)')
     ok(alice.welcome!.workerToken.startsWith('w_') && alice.welcome!.hingeToken.startsWith('h_'), 'seat issued BOTH tokens: worker + hinge')
     const v0 = await alice.waitView((v) => v.dyads.length === 1, 'first snapshot')
-    ok(v0.storm.inTicks > 0 && v0.storm.severity > 0, 'the storm countdown is live from the first snapshot')
+    ok(v0.phase === 'gathering' && v0.tick === 0, 'a fresh settlement GATHERS (phase in the view, world at tick 0)')
+    ok(v0.storm.inTicks > 0 && v0.storm.severity > 0, 'the storm countdown is visible from the first snapshot')
     ok(v0.frontier === 'wall', 'the milestone frontier starts at the wall')
     ok(v0.engine !== null && typeof v0.engine.version === 'string', `engine identity pinned in the view (${v0.engine?.engine} ${v0.engine?.version})`)
     alice.close()
@@ -255,7 +258,16 @@ async function main(): Promise<void> {
     const re = await api(`/api/room/${pin}/join`, { body: { name: 'Bea', key: bea.key } })
     ok(re.status === 200 && re.json['rejoined'] === true && re.json['workerToken'] === bea.worker && re.json['hingeToken'] === bea.hinge, 'reconnect-by-key returns the SAME seat + tokens')
 
+    // ── THE OPENING BELL: rooms GATHER frozen until the host hinge starts ────
+    await new Promise((r) => setTimeout(r, 700)) // > 2 tick-lengths at tickMs 300
+    const frozen = (await api(`/api/room/${pin}/state`, { token: host.worker })).json['view'] as RoomView
+    ok(frozen.phase === 'gathering' && frozen.tick === 0, 'FROZEN: 2+ tick-lengths after create, the room still holds at tick 0 (gathering)')
+    ok(frozen.nextTickInMs === null, 'the view says the world holds still (nextTickInMs null while gathering)')
+    ok((await api(`/api/room/${pin}/start`, { token: host.worker, body: {} })).status === 403, 'START with the worker token → 403 (the bell is a human act)')
+    ok((await api(`/api/room/${pin}/start`, { token: bea.hinge, body: {} })).status === 403, 'START by a non-host hinge → 403 (the host rings the bell)')
+
     // ── FREEDOM: deploys are DIRECT; gates are the seat's own policy ─────────
+    // (everything in this block runs while GATHERING — arming is open pre-bell)
     const yolo = await api(`/api/room/${pin}/deploy`, { token: host.worker, body: { id: 'crash', scope: 'district', source: 'this is not starlark' } })
     ok(yolo.status === 200 && yolo.json['verified'] === false, 'district deploy lands UNVERIFIED — YOLO allowed, your rubble')
 
@@ -290,6 +302,20 @@ async function main(): Promise<void> {
     const noticeKinds = (hostView.you!.notices ?? []).map((n) => n.kind)
     ok(noticeKinds.includes('gate-set') && noticeKinds.includes('gate-blocked'), 'seat notices carry gate-set + gate-blocked (private)')
     ok(hostView.you!.gatePolicy.shared[0] === 'oracle-green', 'the view carries YOUR gate policy (agent-visible)')
+
+    // deploys, gates, oracle dry-runs, notices — ALL of the above worked while
+    // the room gathered. Now the host rings the bell and the world begins.
+    const preBell = (await api(`/api/room/${pin}/state`, { token: host.worker })).json['view'] as RoomView
+    ok(preBell.phase === 'gathering' && preBell.tick === 0, 'deploys ARM while gathering — the world stayed frozen through all of it')
+    ok((await api(`/api/room/${pin}/start`, { token: host.hinge, body: {} })).status === 200, 'START by the HOST hinge → the opening bell (a logged command)')
+    ok((await api(`/api/room/${pin}/start`, { token: host.hinge, body: {} })).status === 409, 'a second start → 409 (the world is already running)')
+    let ticked: RoomView | null = null
+    for (let i = 0; i < 30 && !ticked; i++) {
+      await new Promise((r) => setTimeout(r, 150))
+      const v = (await api(`/api/room/${pin}/state`, { token: host.worker })).json['view'] as RoomView
+      if (v.tick >= 1) ticked = v
+    }
+    ok(ticked !== null && ticked.phase === 'running', 'ticks begin after the bell (phase running)')
 
     // ── ENGINE INTEGRATION on the real path: a template mines real ore ───────
     const miner = await api(`/api/room/${pin}/deploy`, { token: bea.worker, body: { id: 'miner', scope: 'district', source: MINER_SRC } })
@@ -357,6 +383,7 @@ async function main(): Promise<void> {
     ok(promptText.includes('gate-policy') && promptText.includes('beta-run') && promptText.includes('chronicle'), 'the prompt teaches gates, the Mirror Yard, and the chronicle')
     ok(promptText.includes('more than this document admits'), 'the prompt carries the ONE honest hidden-surface hint')
     ok(promptText.includes('handed, not taken'), 'the prompt teaches hinge CUSTODY: the vote token is handed by the human, never taken')
+    ok(promptText.includes('"gathering"') && promptText.includes('state.phase'), 'the prompt teaches the GATHERING state (frozen world, arm now)')
     ok((await fetch(`${BASE}/api/room/${pin}/agent-prompt?token=${host.hinge}`)).status === 403, 'agent-prompt with the hinge token → 403 (wrong surface)')
 
     // ── DROP-IN mid-game over ws + the redaction audit ───────────────────────
@@ -365,7 +392,7 @@ async function main(): Promise<void> {
     await carol.waitFor((m) => m.type === 'welcome', 'carol welcome')
     ok(carol.welcome!.index === 2, 'ws drop-in mid-game gets the next district')
     const cv = await carol.waitView((v) => v.dyads.length === 3, 'carol view')
-    ok(cv.tick > 0 && cv.dyads[2].district === 2, `drop-in landed in a RUNNING world (tick ${cv.tick})`)
+    ok(cv.tick > 0 && cv.phase === 'running' && cv.dyads[2].district === 2, `drop-in AFTER the start works unchanged (tick ${cv.tick}, running)`)
     await carol.waitView((v) => v.you !== null && v.tick >= cv.tick + 2, 'carol sees ticks advance')
     const carolRaws = carol.snapshotRaws.join('\n')
     ok(!carolRaws.includes(MINER_SRC.slice(0, 30)), "REDACTION: other seats' script SOURCE never crosses the wire")
@@ -390,6 +417,8 @@ async function main(): Promise<void> {
     // the replay below must reproduce them (economy + shared memory replay)
     await api(`/api/room/${soloPin}/chronicle`, { token: soloTok, body: { text: 'replay-proof claim', evidence: ['wstest'] } })
     await api(`/api/room/${soloPin}/beta-run`, { token: soloTok, body: { script: 'act("farm", rate=1)', scope: 'district', ticks: 1 } })
+    // ring the bell — the start command enters the log, and replay must carry it
+    ok((await api(`/api/room/${soloPin}/start`, { token: solo.json['hingeToken'] as string, body: {} })).status === 200, 'solo room started (the bell rides the log)')
     await new Promise((r) => setTimeout(r, 1700))
     let logView: RoomLogView | null = null
     let stView: RoomView | null = null
@@ -411,6 +440,7 @@ async function main(): Promise<void> {
       ok(replayed.dyads[0].ore === stView.dyads[0].ore && replayed.dyads[0].tokens === stView.dyads[0].tokens, `REPLAY: seed + log reproduces the live room over the wire (ore ${replayed.dyads[0].ore}, ⚡ ${replayed.dyads[0].tokens})`)
       ok(stateHash(replayed).length === 8, 'replay hash computable from the wire artifact')
       ok(replayed.chronicle.length === 1 && replayed.chronicle[0].text === 'replay-proof claim', 'REPLAY: the chronicle rides the log (spend + chronicle commands replay)')
+      ok(entries.some((e) => e.cmd.t === 'start') && replayed.started, 'REPLAY DETERMINISM with the start command in the log (the bell is replay data)')
       ok(entries.some((e) => e.cmd.t === 'spend'), 'the beta debit is IN the log; the beta run itself is not')
       ok(!JSON.stringify(entries).includes('"perTick"'), 'no beta report material ever enters the log')
     }
@@ -428,7 +458,7 @@ async function main(): Promise<void> {
       const runA = await api(`/api/room/${mPin}/beta-run`, { token: mTok, body: { script: 'act("gather", node=1, rate=2)\nact("farm", rate=2)', scope: 'district', ticks: 3 } })
       ok(runA.status === 200, 'beta-run happy path → 200')
       const repA = runA.json['report'] as BetaReport
-      ok(repA.ok && repA.perTick.length === 3, 'beta report: 3 ticks rehearsed, clean = PASS')
+      ok(repA.ok && repA.perTick.length === 3, 'beta report: 3 ticks rehearsed, clean = PASS (room still GATHERING — the yard rehearses pre-bell)')
       ok(repA.totals.food === 6, `beta yields honest deltas (food ${repA.totals.food})`)
       const mid = ((await api(`/api/room/${mPin}/state`, { token: mTok })).json['view'] as RoomView).dyads[0].tokens
       ok(mid === before - BETA_RUN_COST, `beta debits ${BETA_RUN_COST}⚡ from the REAL balance`)
@@ -499,6 +529,7 @@ async function main(): Promise<void> {
       const h = await api('/api/room', { body: { name: 'Digger', tickMs: 300 } })
       const hPin = h.json['pin'] as string
       const hW = h.json['workerToken'] as string
+      await api(`/api/room/${hPin}/start`, { token: h.json['hingeToken'] as string, body: {} }) // verbs need a running world
       const frag = await fetch(`${BASE}/api/help/aimancer?token=${hW}`)
       ok(frag.status === 200 && (await frag.text()).length > 50, 'a hidden topic WITH a seat token answers with the lore fragment')
       const afterFind = (await api(`/api/room/${hPin}/state`, { token: hW })).json['view'] as RoomView
@@ -551,7 +582,7 @@ async function main(): Promise<void> {
       const j2 = await api(`/api/room/${ePin}/join`, { body: { name: 'Guest' } })
       ok((await api(`/api/room/${ePin}/end`, { token: eW, body: {} })).status === 403, 'END with the worker token → 403 (a human act)')
       ok((await api(`/api/room/${ePin}/end`, { token: j2.json['hingeToken'] as string, body: {} })).status === 403, 'END by a non-host hinge → 403')
-      ok((await api(`/api/room/${ePin}/end`, { token: eH, body: {} })).status === 200, 'END by the HOST hinge → the host calls the game')
+      ok((await api(`/api/room/${ePin}/end`, { token: eH, body: {} })).status === 200, 'END by the HOST hinge works FROM GATHERING (a never-started room ends cleanly)')
       const ended = (await api(`/api/room/${ePin}/state`, { token: eW })).json['view'] as RoomView
       ok(ended.launched && ended.endedEarly && ended.end !== null, 'the end screen stands as it was (endedEarly flagged)')
       ok((await api(`/api/room/${ePin}/deploy`, { token: eW, body: { id: 'x', scope: 'district', source: 'act("farm", rate=1)' } })).status === 409, 'no deploys into an ended settlement')
@@ -607,7 +638,7 @@ async function main(): Promise<void> {
       const idle = reg.create()
       idle.touch()
       reg.sweep(Date.now() + 31 * 60_000, 30 * 60_000)
-      ok(reg.get(idle.code) === undefined, 'IDLE SWEEP: an abandoned (HTTP-only) room is reaped after the inactivity TTL')
+      ok(reg.get(idle.code) === undefined, 'IDLE SWEEP: an abandoned NEVER-STARTED room is reaped after the inactivity TTL (gathering rooms are not immortal)')
     }
 
     // ── refusal shapes ───────────────────────────────────────────────────────

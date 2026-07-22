@@ -83,6 +83,11 @@ export interface BetaRunInput {
  * FAULT (timeout/crash) — a script error is a report line, not an exception. */
 export async function runBetaFork(input: BetaRunInput): Promise<BetaReport> {
   const fork = structuredClone(input.sim) as SimState
+  // the Mirror Yard always rehearses a RUNNING world — a gathering settlement
+  // (pre-start, frozen) can still rehearse what the world WILL do. The live
+  // sim is untouched; determinism holds (the fork state is the same each run
+  // while the world holds still).
+  fork.started = true
   const d = fork.dyads[input.seat]
   if (!d) throw new Error('no such dyad')
   const script: DeployedScript = {

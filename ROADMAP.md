@@ -332,6 +332,35 @@ AWAITING the lore content-map: real fragments/canon names/conditions replace
 the placeholders the moment `lore/content-map.json` ships (loader + validator
 live; malformed entries skipped loud).
 
+## ★ THE OPENING BELL (2026-07-22 — Michael's ruling: no game starts itself)
+
+The ark pivot made rooms tick from creation; ruled back: **the game must not
+start until the HOST starts it** — a gate, not a lobby of rounds.
+
+- **`gathering` state:** rooms are founded gathering — joins/reconnects open,
+  agents connect, wiki reads, and (the friendly call) **deploys ARM** (oracle
+  dry-runs, gate policies, Mirror Yard rehearsals, chronicle — all live), but
+  the WORLD IS FROZEN: no ticks, no storms, no ⚡ regen. Sim-owned:
+  `SimState.started` + `ticksRunning()` requires it; `started` is in `snap()`
+  (replay identity). The Mirror Yard forks with `started=true` so rehearsal
+  works pre-bell.
+- **Host start:** `{t:'start'}` is a LOGGED command (replays carry the bell);
+  server-enforced seat-0 HINGE only, on ws (`{type:'start'}`) and HTTP
+  (`POST /api/room/:pin/start`). Second start → 409; worker/non-host → 403.
+  `lastTickAt` resets at the bell so tick 1 lands one full tick-length after.
+- **Surfaces:** `RoomView.phase: gathering|running|ended`; phone shows the
+  host a prominent START button (others: "waiting for the host to call it");
+  board gathering = the join-teaching screen (URL + PIN big, 3 join steps,
+  "the world begins when the host calls it"); agent-prompt teaches
+  `state.phase` ("arm now, ticks wait"); rules/wiki gained the gathering
+  paragraph + the start route (smoke drift-guards them).
+- **Lifecycle:** drop-in join AFTER start unchanged (wstest-proven); the idle
+  sweeper reaps abandoned never-started rooms on the same TTL; host `/end`
+  works FROM gathering (never-started rooms end cleanly).
+
+Gates grew: smoke 208→221 · enginetest 29 · wstest 141→154 · liveproof 16→19
+(frozen-probe + worker-start-403 + host-start live).
+
 ### Next (the polish day)
 
 - Storm/milestone/launch SFX + art pass (asset-harness). **★ Lore asset pass

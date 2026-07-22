@@ -63,12 +63,14 @@ function initialVeins(seed: number): SimState['veins'] {
   return veins
 }
 
-/** A settlement starts EMPTY — dyads drop in via the logged joinDistrict
- * command (replays reproduce the exact join order and timing). */
+/** A settlement starts EMPTY and GATHERING — dyads drop in via the logged
+ * joinDistrict command (replays reproduce the exact join order and timing),
+ * and the world holds still until the host's logged `start` command. */
 export function newGame(seed = 1): SimState {
   return {
     seed,
     tick: 0,
+    started: false,
     dyads: [],
     veins: initialVeins(seed),
     structures: newStructures(),
@@ -107,9 +109,11 @@ export function scriptSlots(s: SimState): number {
   return Math.min(SCRIPT_SLOTS_MAX, SCRIPT_SLOTS_BASE + Math.floor(s.survivors / SURVIVORS_PER_SLOT))
 }
 
-/** The world runs while at least one dyad is seated and the ark hasn't left. */
+/** The world runs only after the host's opening bell (`start`), while at
+ * least one dyad is seated, and until the ark leaves. Before the bell the
+ * settlement GATHERS: frozen world, open doors. */
 export function ticksRunning(s: SimState): boolean {
-  return s.dyads.length > 0 && !s.launched
+  return s.started && s.dyads.length > 0 && !s.launched
 }
 
 export function goVotes(s: SimState): number {
@@ -141,6 +145,15 @@ export function apply(s: SimState, cmd: Command): void {
       const district = s.dyads.length
       s.dyads.push(newDyad(name, district, s.tick))
       emit(s, { t: 'joined', dyad: district, name, district })
+      return
+    }
+    case 'start': {
+      // THE OPENING BELL — host act (server-enforced host-hinge). Gathering
+      // ends; ticks/storms/regen begin. Logged: replays carry the bell.
+      if (s.started) fail('the world is already running')
+      if (s.dyads.length === 0) fail('no dyads seated — the bell rings for someone')
+      s.started = true
+      emit(s, { t: 'started' })
       return
     }
     default:
@@ -466,6 +479,7 @@ export function snap(s: SimState): string {
   return JSON.stringify({
     seed: s.seed,
     tick: s.tick,
+    started: s.started,
     dyads: s.dyads,
     veins: s.veins,
     structures: s.structures,

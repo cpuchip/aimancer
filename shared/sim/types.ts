@@ -3,6 +3,12 @@
 // districts, REAL Starlark scripts run by the Go engine, storms on a visible
 // countdown, collective milestones ending in the ark launch vote.
 //
+// THE OPENING BELL (host gate, 2026-07-22): a settlement is founded GATHERING
+// — joins, deploys, oracle checks, and rehearsals all work, but the WORLD IS
+// FROZEN (no ticks, no storms, no regen) until the HOST calls the start (a
+// logged command — replays carry the bell). Drop-in joins after the start are
+// unchanged; the gate is only the opening bell, never a lobby of rounds.
+//
 // Replay identity is unchanged and absolute: sim = f(seed + command log).
 // The ENGINE never runs inside the sim — a deployed script's emitted actions
 // enter the log as DATA (`scriptTick`), exactly the way LLM drafts did in the
@@ -192,6 +198,10 @@ export interface EndStats {
 export interface SimState {
   seed: number
   tick: number
+  /** The opening bell: false = GATHERING (dyads seat up, deploys arm, the
+   * world holds still); true after the host's logged `start` command — only
+   * then do ticks, storms, and regen run. */
+  started: boolean
   dyads: Dyad[]
   veins: VeinState[]
   structures: Record<StructureKind, SharedStructure>
@@ -228,6 +238,7 @@ export type SimEvent =
   | { t: 'veinSpawned'; id: number; rate: number; reserve: number }
   | { t: 'veinExhausted'; id: number }
   | { t: 'voteCast'; dyad: number; go: boolean }
+  | { t: 'started' } // the host rang the opening bell — the world runs
   | { t: 'launch'; goVotes: number; dyads: number }
   | { t: 'ended' } // the host called the game — no launch, the books open
   // The chronicle speaks: a claim posted, or a hidden surface FIRST found
@@ -255,6 +266,10 @@ export type Command =
   // starved=true means the server skipped the engine call (not enough ⚡).
   | { t: 'scriptTick'; player?: number; id: string; actions: Action[]; gasUsed: number; err?: string; starved?: boolean; logs?: string[] }
   | { t: 'vote'; player?: number; go: boolean } // hinge-only (server-enforced)
+  // THE OPENING BELL: the host starts the world (server-enforced host-hinge).
+  // Until it lands the settlement GATHERS — joins/deploys/oracle/rehearsals
+  // work, ticks/storms/regen do not. Logged, so replays carry the bell.
+  | { t: 'start' }
   | { t: 'launch' } // host act — refused until ark complete + majority GO
   // HOST END (anti-immortal-rooms): the host calls the game — the world rests,
   // end stats are captured as they stand, the books open. Server-enforced
