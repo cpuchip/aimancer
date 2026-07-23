@@ -369,9 +369,12 @@ Gates grew: smoke 208→221 · enginetest 29 · wstest 141→154 · liveproof 16
   form, 3 figures incl. the Gremlin Mother, 3 epoch banners) — same brass/
   indigo/violet style anchor as the shipped set, generated via
   `generate_aimancer_lore.py` in the asset-harness clone. **★ Soundtrack pass
-  done (2026-07-22):** 6 original lore-true tracks in `public/assets/music/`
-  (ACE-Step 1.5 XL turbo, local; incl. "Keep the Lights On" — Snag's lament,
-  with vocals, lyrics from `lore/the-gremlin.md`; see the folder's
+  done (2026-07-22):** 12 original lore-true tracks in `public/assets/music/`
+  (ACE-Step 1.5 XL turbo, local; two vocal tracks — "Keep the Lights On"
+  [Snag's lament, `lore/the-gremlin.md`] and "First Aimancer's Hymn" [the
+  First Compact, `lore/history-the-epochs.md`]; second six added later the
+  same day: Clipped Tongue / Mirror Yard / Unanswered Bell / Hymn / Storm
+  Audit / Unwoven Ledger; see the folder's
   `CREDITS.md`). In-game audio playback NOT wired yet — that's a later
   polish item (music toggle + storm/launch cue hooks).
 - Family playtest → balance pass on storm severity + vein cadence.
