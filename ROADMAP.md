@@ -368,7 +368,12 @@ Gates grew: smoke 208→221 · enginetest 29 · wstest 141→154 · liveproof 16
   (4 glyph medallions, 4 relics incl. an older/wilder Oracle's Eye origin
   form, 3 figures incl. the Gremlin Mother, 3 epoch banners) — same brass/
   indigo/violet style anchor as the shipped set, generated via
-  `generate_aimancer_lore.py` in the asset-harness clone.
+  `generate_aimancer_lore.py` in the asset-harness clone. **★ Soundtrack pass
+  done (2026-07-22):** 6 original lore-true tracks in `public/assets/music/`
+  (ACE-Step 1.5 XL turbo, local; incl. "Keep the Lights On" — Snag's lament,
+  with vocals, lyrics from `lore/the-gremlin.md`; see the folder's
+  `CREDITS.md`). In-game audio playback NOT wired yet — that's a later
+  polish item (music toggle + storm/launch cue hooks).
 - Family playtest → balance pass on storm severity + vein cadence.
 - Board: wall-absorb animation beat + survivor arrivals visual.
 - loom-bots equivalent for the ark (drive 2-3 real agent seats).
