@@ -375,8 +375,15 @@ Gates grew: smoke 208→221 · enginetest 29 · wstest 141→154 · liveproof 16
   First Compact, `lore/history-the-epochs.md`]; second six added later the
   same day: Clipped Tongue / Mirror Yard / Unanswered Bell / Hymn / Storm
   Audit / Unwoven Ledger; see the folder's
-  `CREDITS.md`). In-game audio playback NOT wired yet — that's a later
-  polish item (music toggle + storm/launch cue hooks).
+  `CREDITS.md`). **★ THE JUKEBOX shipped (2026-07-23):** track manifest
+  (`src/music.ts`, mood-tagged) + shared player (`src/jukebox.svelte.ts`,
+  plain HTMLAudioElement, fade-swap, OFF by default, prefs in localStorage) +
+  phone Jukebox panel (play/pause, volume, loop / shuffle-within-mood,
+  credits link) + board ambient chip with SMART CUES (gathering loop →
+  running rotation work/lore/wildcard → storm theme when the countdown turns
+  imminent → The Launch, then quiet lore over the open books; an early host
+  end cues The Unanswered Bell). Pure presentation from snapshots — the sim
+  never knows.
 - Family playtest → balance pass on storm severity + vein cadence.
 - Board: wall-absorb animation beat + survivor arrivals visual.
 - loom-bots equivalent for the ark (drive 2-3 real agent seats).

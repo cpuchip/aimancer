@@ -5,6 +5,7 @@
   // the ark stands — cast the GO/NO-GO vote (the hinge lives HERE, never in
   // the agent's API).
   import { clientKey, wsUrl } from './net.ts'
+  import Jukebox from './Jukebox.svelte'
   import { TEMPLATES } from '../shared/templates.ts'
   import { MILESTONE_ORDER } from '../shared/sim/types.ts'
   import type { GatePolicy, GateRequirement } from '../shared/gatePolicy.ts'
@@ -418,6 +419,9 @@
       <p class="muted" style="margin:0">Copy the prompt into YOUR agent (Claude Code / codex / copilot). It gets the WORKER token — it deploys directly, within the gates you set above. The launch vote stays with your hinge token (on this phone, or handed over when YOU choose).</p>
       <button class="oracle" onclick={copyAgentPrompt}>copy the agent prompt</button>
     </div>
+
+    <!-- SETTINGS: the JUKEBOX (music is yours to start — never an ambush) -->
+    <Jukebox />
 
     {#if isHost}
       <div class="card stack">

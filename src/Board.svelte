@@ -5,6 +5,8 @@
   // tokens (redacted server-side; wstest proves it).
   import { flip } from 'svelte/animate'
   import { wsUrl } from './net.ts'
+  import { jukebox } from './jukebox.svelte.ts'
+  import { moodTracks, trackById, TRACKS } from './music.ts'
   import { describeEvent, freshEvents, isDisaster, isTriumph, newFeedCursor } from '../shared/eventFeed.ts'
   import { MILESTONE_ORDER } from '../shared/sim/types.ts'
   import { districtPos, fmtClock, statusIcon, stormUrgency, STRUCTURE_ICON, STRUCTURE_LABEL } from './ui.ts'
@@ -48,6 +50,64 @@
   ws.onclose = () => (status = 'disconnected')
 
   const urgency = $derived(view ? stormUrgency(view.storm.inTicks) : 'calm')
+
+  // ── AMBIENT MUSIC (the projector is the room's speakers) ────────────────
+  // Pure presentation from snapshots — the sim never knows. OFF until the
+  // host taps the chip (the tap is the browser's required gesture). Smart
+  // cues follow the phase: gathering loop → running rotation (work/lore/
+  // wildcard) → storm theme when the countdown turns imminent → The Launch.
+  let musicOn = $state(false)
+  let smartCues = $state(localStorage.getItem('aimancer-board-cues') !== '0')
+  let lastCue = ''
+
+  const cue = $derived(
+    !view
+      ? ''
+      : view.endedEarly
+        ? 'ended-early'
+        : view.launched
+          ? 'launch'
+          : view.phase === 'gathering'
+            ? 'gathering'
+            : urgency === 'imminent'
+              ? 'storm'
+              : 'running',
+  )
+
+  function playPool(ids: string[], firstId?: string): void {
+    jukebox.pool = ids
+    const first = (firstId && trackById(firstId)) || trackById(ids[Math.floor(Math.random() * ids.length)])
+    if (first) jukebox.play(first)
+  }
+
+  function applyCue(c: string): void {
+    if (!c || c === lastCue) return
+    lastCue = c
+    if (c === 'gathering') playPool(moodTracks('gathering').map((t) => t.id), 'gathering')
+    else if (c === 'storm') playPool(moodTracks('storm').map((t) => t.id))
+    else if (c === 'launch') playPool(moodTracks('lore').map((t) => t.id), 'the-launch') // fanfare once, then quiet lore for the open books
+    else if (c === 'ended-early') playPool(moodTracks('lore').map((t) => t.id), 'the-unanswered-bell') // the host called it
+    else playPool(moodTracks('work', 'lore', 'wildcard').map((t) => t.id), 'the-work')
+  }
+
+  $effect(() => {
+    if (musicOn && smartCues) applyCue(cue)
+  })
+
+  function toggleMusic(): void {
+    musicOn = !musicOn
+    lastCue = ''
+    if (!musicOn) jukebox.stop()
+    else if (smartCues) applyCue(cue)
+    else playPool(TRACKS.map((t) => t.id))
+  }
+
+  function toggleCues(): void {
+    smartCues = !smartCues
+    localStorage.setItem('aimancer-board-cues', smartCues ? '1' : '0')
+    lastCue = ''
+    if (musicOn && smartCues) applyCue(cue)
+  }
   const wallPct = $derived(view ? Math.min(100, Math.round((100 * view.structures.wall.hp) / Math.max(1, view.structures.wall.hpMax))) : 0)
   const arkPct = $derived(view ? Math.min(100, Math.round((100 * view.structures.ark.parts) / view.structures.ark.partsRequired)) : 0)
   const ranked = $derived(view ? [...view.dyads].sort((a, b) => b.contributed - a.contributed) : [])
@@ -81,6 +141,28 @@
     <img class="board-emblem" src="/assets/emblem.png" alt="" />
     <span class="wordmark">AIMANCER</span>
     <span class="muted board-tag">one settlement · real scripts · the storm is coming</span>
+    <!-- ambient music — subtle chip, host-tapped, never autoplay -->
+    <span class="music-chip" class:on={musicOn}>
+      {#if musicOn && jukebox.track}
+        <span class="music-now num" title={jukebox.track.blurb}>♪ {jukebox.track.title}</span>
+        <button class="music-btn" onclick={() => jukebox.skip()} title="next track">⏭</button>
+        <button class="music-btn" class:cues-on={smartCues} onclick={toggleCues} title="smart cues — the music follows the phase (gathering / work / storm / launch)">
+          {smartCues ? '✨ cues' : 'cues off'}
+        </button>
+        <input
+          class="music-vol"
+          type="range"
+          min="0"
+          max="100"
+          value={Math.round(jukebox.volume * 100)}
+          oninput={(e) => jukebox.setVolume(Number((e.currentTarget as HTMLInputElement).value) / 100)}
+          aria-label="music volume"
+        />
+      {/if}
+      <button class="music-btn music-main" onclick={toggleMusic} title={musicOn ? 'music off' : 'ambient music on (the projector is the room’s speakers)'}>
+        {musicOn ? '🔇' : '🎵 music'}
+      </button>
+    </span>
   </div>
 
   {#if view && view.launched && view.end}

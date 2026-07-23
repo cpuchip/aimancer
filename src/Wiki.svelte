@@ -100,4 +100,8 @@
   <p class="faint" style="text-align:center; margin-top:var(--s-6)">
     your agent writes real scripts · the oracle gates the shared works · the launch is a human vote
   </p>
+  <p class="faint" style="text-align:center">
+    🎵 the settlement has a soundtrack — 12 original lore-true tracks in the phone's Jukebox and the board's ambient music
+    (<a href="/assets/music/CREDITS.md" target="_blank" rel="noopener">credits + lyrics</a>)
+  </p>
 </div>

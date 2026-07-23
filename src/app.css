@@ -581,3 +581,42 @@ td.r, th.r { text-align: right; }
 .theater-good { color: var(--ok-strong, #2e8b57); font-weight: 600; }
 .vote-panel { border-color: var(--accent); box-shadow: 0 0 16px -6px var(--accent); }
 .logline { padding-left: var(--s-3); }
+
+/* ── THE JUKEBOX (phone panel + board ambient chip) ──────────────────────── */
+.jb summary { cursor: pointer; padding: var(--s-1) 0; }
+.jb summary::marker { color: var(--ink-faint); }
+.jb .jb-now { margin-left: var(--s-2); font-size: var(--t-sm); color: var(--accent); }
+.jb-controls { margin: var(--s-3) 0; gap: var(--s-3); }
+.jb-controls input[type='checkbox'] { width: auto; min-height: 0; margin: 0; }
+.jb-stop { min-height: 36px; padding: var(--s-1) var(--s-3); }
+input[type='range'].jb-vol { min-height: 0; padding: 0; margin: 0; accent-color: var(--accent); background: transparent; border: none; }
+.jb-row {
+  display: flex; align-items: center; gap: var(--s-2);
+  width: 100%; text-align: left;
+  background: transparent; border: none; border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-2); min-height: 40px;
+  font-weight: 400; color: var(--ink-soft);
+}
+.jb-row:hover { background: var(--raised); }
+.jb-row.jb-current { background: var(--accent-soft); color: var(--ink); }
+.jb-row .jb-play { width: 20px; text-align: center; color: var(--accent); }
+.jb-row .jb-title { flex: 1; font-weight: 600; }
+.jb-row .jb-mood { font-size: var(--t-xs); color: var(--ink-faint); white-space: nowrap; }
+.jb-row .jb-len { font-size: var(--t-xs); }
+
+/* board: the ambient chip — subtle, right of the head, never loud */
+.music-chip { display: inline-flex; align-items: center; gap: var(--s-2); margin-left: var(--s-3); }
+.music-chip .music-now {
+  font-size: var(--t-sm); color: var(--ink-soft); white-space: nowrap;
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+}
+.music-chip.on .music-now { color: var(--accent); }
+button.music-btn {
+  min-height: 28px; padding: 2px var(--s-2);
+  font-size: var(--t-xs); font-weight: 400;
+  background: transparent; border: 1px solid var(--line); border-radius: var(--r-pill);
+  color: var(--ink-soft);
+}
+button.music-btn.cues-on { border-color: var(--accent); color: var(--accent); }
+button.music-btn.music-main { font-weight: 600; }
+input[type='range'].music-vol { width: 72px; min-height: 0; padding: 0; margin: 0; accent-color: var(--accent); background: transparent; border: none; }
